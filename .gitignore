@@ -1,0 +1,7 @@
+*.o
+*.so
+*.lo
+*.la
+*.a
+*.pyc
+.DS_Store
