@@ -1,3 +1,20 @@
+/*
+ * hooks.c - PostgreSQL Quality of Service (QoS) Extension Hook Implementation
+ *
+ * This file implements the core hook functionality for the PostgreSQL QoS extension,
+ * providing query execution control and resource management through PostgreSQL's
+ * hook mechanism.
+ *
+ * Author:  M.Atif Ceylan
+ * Company: AppstoniA OÜ
+ * Created: October 02, 2025
+ * Version: 1.0
+ * License: See LICENSE file in the project root
+ *
+ * Copyright (c) 2025 AppstoniA OÜ
+ * All rights reserved.
+ */
+
 #include "postgres.h"
 #include "miscadmin.h"
 #include "tcop/utility.h"

@@ -1,3 +1,20 @@
+/*
+ * qos.c - PostgreSQL Quality of Service (QoS) Extension Main Module
+ *
+ * This file contains the main implementation of the PostgreSQL QoS extension,
+ * including initialization, configuration management, and the extension's
+ * primary functions for quality of service control.
+ *
+ * Author:  M.Atif Ceylan
+ * Company: AppstoniA OÜ
+ * Created: October 02, 2025
+ * Version: 1.0
+ * License: See LICENSE file in the project root
+ *
+ * Copyright (c) 2025 AppstoniA OÜ
+ * All rights reserved.
+ */
+
 #include "postgres.h"
 #include "fmgr.h"
 #include "utils/builtins.h"
