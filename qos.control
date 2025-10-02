@@ -1,0 +1,4 @@
+comment = 'QoS (Quality of Service) Resource Governor Extension'
+default_version = '1.0'
+module_pathname = '$libdir/qos'
+relocatable = false
