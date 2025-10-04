@@ -16,33 +16,118 @@
  */
 
 #include "postgres.h"
+#include "qos.h"
 #include "miscadmin.h"
 #include "tcop/utility.h"
 #include "executor/executor.h"
 #include "utils/guc.h"
+#include "utils/memutils.h"
+#include "storage/proc.h"
+#include "portability/instr_time.h"
+#include "nodes/parsenodes.h"
+#include "nodes/value.h"
+#include <unistd.h>
 #include <sys/resource.h>
-#include "hooks.h"
+#include <strings.h>
 
-/* forward declarations for previous hooks */
+/* Hook save variables */
 static ProcessUtility_hook_type prev_ProcessUtility = NULL;
-static ExecutorStart_hook_type prev_ExecutorStart = NULL;
-char *qos_work_mem_limit = NULL;
 
-/* --- check limits --- */
-static void qos_check_limits(void)
+/*
+ * Enforce work_mem limit when SET work_mem is executed
+ */
+void
+qos_enforce_work_mem_limit(VariableSetStmt *stmt)
 {
-    /* here role-based limit checks can be implemented */
-    if (qos_work_mem_limit)
+    QoSLimits role_limits;
+    QoSLimits db_limits;
+    int64 max_work_mem = -1;
+    int new_work_mem_kb = 0;
+    A_Const *arg;
+    char *value_str = NULL;
+    char *endptr;
+    int64 value;
+    int64 new_work_mem_bytes;
+    
+    if (!qos_enabled)
+        return;
+    
+    /* Only process work_mem SET commands */
+    if (!stmt || !stmt->name || strcmp(stmt->name, "work_mem") != 0 || stmt->kind != VAR_SET_VALUE)
+        return;
+    
+    role_limits = qos_get_role_limits(GetUserId());
+    db_limits = qos_get_database_limits(MyDatabaseId);
+    
+    /* Get most restrictive work_mem limit */
+    if (role_limits.work_mem_limit >= 0 && db_limits.work_mem_limit >= 0)
+        max_work_mem = Min(role_limits.work_mem_limit, db_limits.work_mem_limit);
+    else if (role_limits.work_mem_limit >= 0)
+        max_work_mem = role_limits.work_mem_limit;
+    else if (db_limits.work_mem_limit >= 0)
+        max_work_mem = db_limits.work_mem_limit;
+    
+    /* Parse the new value */
+    if (max_work_mem >= 0 && stmt->args != NIL)
     {
-        SetConfigOption("work_mem",
-                        qos_work_mem_limit,
-                        PGC_USERSET,
-                        PGC_S_SESSION);
-        elog(DEBUG1, "qos: applied work_mem limit = %s", qos_work_mem_limit);
+        arg = (A_Const *) linitial(stmt->args);
+        
+        if (IsA(arg, A_Const))
+        {
+            if (nodeTag(&arg->val) == T_Integer)
+            {
+                new_work_mem_kb = intVal(&arg->val);
+            }
+            else if (nodeTag(&arg->val) == T_String)
+            {
+                value_str = strVal(&arg->val);
+                /* Parse memory value like "128MB" */
+                value = strtol(value_str, &endptr, 10);
+                
+                if (*endptr != '\0')
+                {
+                    /* Has unit suffix */
+                    if (strcasecmp(endptr, "kb") == 0 || strcasecmp(endptr, "kB") == 0)
+                        new_work_mem_kb = value;
+                    else if (strcasecmp(endptr, "mb") == 0 || strcasecmp(endptr, "MB") == 0)
+                        new_work_mem_kb = value * 1024;
+                    else if (strcasecmp(endptr, "gb") == 0 || strcasecmp(endptr, "GB") == 0)
+                        new_work_mem_kb = value * 1024 * 1024;
+                    else
+                        new_work_mem_kb = value; /* Assume KB */
+                }
+                else
+                {
+                    new_work_mem_kb = value; /* No unit = KB */
+                }
+            }
+        }
+        
+        /* Check limit */
+        new_work_mem_bytes = (int64)new_work_mem_kb * 1024L;
+        
+        if (new_work_mem_bytes > max_work_mem)
+        {
+            if (qos_shared_state)
+            {
+                LWLockAcquire(qos_shared_state->lock, LW_EXCLUSIVE);
+                qos_shared_state->stats.work_mem_violations++;
+                LWLockRelease(qos_shared_state->lock);
+            }
+            
+            ereport(ERROR,
+                    (errcode(ERRCODE_INSUFFICIENT_RESOURCES),
+                     errmsg("qos: work_mem limit exceeded"),
+                     errdetail("Requested %d KB, maximum allowed is %ld KB",
+                              new_work_mem_kb, max_work_mem / 1024),
+                     errhint("Contact administrator to increase qos.work_mem_limit")));
+        }
     }
 }
 
-/* --- ProcessUtility hook --- */
+/*
+ * ProcessUtility hook - intercept SET commands
+ */
 static void
 qos_ProcessUtility(PlannedStmt *pstmt,
                    const char *queryString,
@@ -53,48 +138,47 @@ qos_ProcessUtility(PlannedStmt *pstmt,
                    DestReceiver *dest,
                    QueryCompletion *qc)
 {
-    if (pstmt && pstmt->utilityStmt && IsA(pstmt->utilityStmt, VariableSetStmt))
+    Node *parsetree = pstmt->utilityStmt;
+    
+    /* Check if setting work_mem */
+    if (qos_enabled && IsA(parsetree, VariableSetStmt))
     {
-        VariableSetStmt *vstmt = (VariableSetStmt *) pstmt->utilityStmt;
-
-        if (vstmt->name && strcmp(vstmt->name, "work_mem") == 0)
-            ereport(ERROR, (errmsg("qos: changing work_mem is restricted by QoS policy")));
+        VariableSetStmt *stmt = (VariableSetStmt *) parsetree;
+        qos_enforce_work_mem_limit(stmt);
     }
-
-    qos_check_limits();
-
+    
+    /* Call previous hook or standard utility */
     if (prev_ProcessUtility)
-        prev_ProcessUtility(pstmt, queryString, readOnlyTree, context, params, queryEnv, dest, qc);
+        prev_ProcessUtility(pstmt, queryString, readOnlyTree, context,
+                          params, queryEnv, dest, qc);
     else
-        standard_ProcessUtility(pstmt, queryString, readOnlyTree, context, params, queryEnv, dest, qc);
+        standard_ProcessUtility(pstmt, queryString, readOnlyTree, context,
+                              params, queryEnv, dest, qc);
 }
 
-/* --- ExecutorStart hook --- */
-static void qos_ExecutorStart(QueryDesc *queryDesc, int eflags)
+/*
+ * Register all hooks
+ */
+void
+qos_register_hooks(void)
 {
-
-    if (prev_ExecutorStart)
-        prev_ExecutorStart(queryDesc, eflags);
-    else
-        standard_ExecutorStart(queryDesc, eflags);
-}
-
-/* --- Register/unregister hooks --- */
-void qos_register_hooks(void)
-{
-    prev_ProcessUtility = ProcessUtility_hook;
+    /* Save previous hooks */
+    prev_ProcessUtility = ProcessUtility_hook;    
+    
+    /* Install our hooks */
     ProcessUtility_hook = qos_ProcessUtility;
-
-    prev_ExecutorStart = ExecutorStart_hook;
-    ExecutorStart_hook = qos_ExecutorStart;
-
-    elog(INFO, "qos: hooks registered");
+        
+    elog(DEBUG1, "qos: hooks registered");
 }
 
-void qos_unregister_hooks(void)
+/*
+ * Unregister all hooks
+ */
+void
+qos_unregister_hooks(void)
 {
-    ProcessUtility_hook = prev_ProcessUtility;
-    ExecutorStart_hook = prev_ExecutorStart;
-
-    elog(INFO, "qos: hooks unregistered");
+    /* Restore previous hooks */
+    ProcessUtility_hook = prev_ProcessUtility;    
+    
+    elog(DEBUG1, "qos: hooks unregistered");
 }

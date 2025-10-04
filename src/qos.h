@@ -20,16 +20,47 @@
 
 #include "postgres.h"
 #include "fmgr.h"
+#include "storage/lwlock.h"
+#include "storage/shmem.h"
+#include "nodes/parsenodes.h"
 
-PG_MODULE_MAGIC;
+/* QoS Limits Structure */
+typedef struct QoSLimits
+{
+    int64   work_mem_limit;        /* Max work_mem in bytes (-1 = no limit) */    
+} QoSLimits;
 
-/* GUC variables */
-extern int qos_cpu_limit;
-extern char *qos_work_mem_limit;
+/* QoS Statistics */
+typedef struct QoSStats
+{    
+    uint64  work_mem_violations;
+} QoSStats;
 
-/* Function prototypes */
-extern void qos_check_limits(void);
+/* Shared State */
+typedef struct QoSSharedState
+{
+    LWLock     *lock;
+    QoSStats    stats;
+} QoSSharedState;
+
+/* Global variables */
+extern QoSSharedState *qos_shared_state;
+extern bool qos_enabled;
+
+/* exported functions */
+extern void _PG_init(void);
+extern void _PG_fini(void);
+
+/* helper C functions callable from SQL */
+extern Datum qos_version(PG_FUNCTION_ARGS);
+extern Datum qos_get_stats(PG_FUNCTION_ARGS);
+extern Datum qos_reset_stats(PG_FUNCTION_ARGS);
 extern void qos_register_hooks(void);
 extern void qos_unregister_hooks(void);
+
+/* Function declarations */
+extern QoSLimits qos_get_role_limits(Oid roleId);
+extern QoSLimits qos_get_database_limits(Oid dbId);
+extern void qos_enforce_work_mem_limit(VariableSetStmt *stmt);
 
 #endif /* QOS_H */
