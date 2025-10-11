@@ -18,6 +18,7 @@
 #include "postgres.h"
 #include "fmgr.h"
 #include "qos.h"
+#include "hooks.h"
 #include "utils/builtins.h"
 #include "utils/guc.h"
 #include "storage/lwlock.h"
@@ -162,6 +163,10 @@ parse_role_configs(ArrayType *configs, QoSLimits *limits)
             
             if (strcmp(name, "qos.work_mem_limit") == 0)
                 limits->work_mem_limit = parse_memory_unit(value);
+            else if (strcmp(name, "qos.cpu_core_limit") == 0)
+                limits->cpu_core_limit = atoi(value);
+            else if (strcmp(name, "qos.max_concurrent_tx") == 0)
+                limits->max_concurrent_tx = atoi(value);            
         }
         
         pfree(config_str);
@@ -185,6 +190,8 @@ qos_get_role_limits(Oid roleId)
     
     /* Set defaults */
     limits.work_mem_limit = -1;
+    limits.cpu_core_limit = -1;
+    limits.max_concurrent_tx = -1;    
     
     /* Open pg_db_role_setting catalog */
     pg_db_role_setting_rel = table_open(DbRoleSettingRelationId, AccessShareLock);
@@ -238,6 +245,8 @@ qos_get_database_limits(Oid dbId)
     
     /* Set defaults */
     limits.work_mem_limit = -1;
+    limits.cpu_core_limit = -1;
+    limits.max_concurrent_tx = -1;    
     
     /* Open pg_db_role_setting catalog */
     pg_db_role_setting_rel = table_open(DbRoleSettingRelationId, AccessShareLock);
