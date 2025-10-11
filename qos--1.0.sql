@@ -1,5 +1,5 @@
 -- qos--1.0.sql
--- PostgreSQL QoS (Quality of Service) Resource Governor Extension
+-- PostgreSQL QoS Resource Governor Extension
 -- SQL install script for the QoS extension
 
 -- complain if script is sourced in psql, rather than via CREATE EXTENSION
@@ -11,6 +11,20 @@ CREATE FUNCTION qos_version()
 RETURNS text
 LANGUAGE C IMMUTABLE STRICT
 AS '$libdir/qos', 'qos_version';
+
+-- Function: qos_get_stats()
+-- Returns current QoS statistics
+CREATE FUNCTION qos_get_stats()
+RETURNS text
+LANGUAGE C STRICT
+AS '$libdir/qos', 'qos_get_stats';
+
+-- Function: qos_reset_stats()
+-- Resets QoS statistics
+CREATE FUNCTION qos_reset_stats()
+RETURNS void
+LANGUAGE C STRICT
+AS '$libdir/qos', 'qos_reset_stats';
 
 -- View: qos_role_settings
 -- Shows current QoS settings for all roles using pg_db_role_setting
@@ -25,6 +39,20 @@ LEFT JOIN pg_database d ON d.oid = s.setdatabase,
 LATERAL unnest(s.setconfig) cfg
 WHERE cfg LIKE 'qos.%';
 
+-- View: qos_database_settings  
+-- Shows QoS settings by database
+CREATE VIEW qos_database_settings AS
+SELECT 
+    d.datname,
+    cfg as setting
+FROM pg_db_role_setting s
+JOIN pg_database d ON d.oid = s.setdatabase,
+LATERAL unnest(s.setconfig) cfg
+WHERE s.setrole = 0  -- Database-level only
+  AND cfg LIKE 'qos.%';
+
 -- Extension metadata
 COMMENT ON EXTENSION qos IS 'PostgreSQL Quality of Service (QoS) Resource Governor';
 COMMENT ON FUNCTION qos_version() IS 'Returns QoS extension version';
+COMMENT ON FUNCTION qos_get_stats() IS 'Returns current QoS statistics';
+COMMENT ON FUNCTION qos_reset_stats() IS 'Resets QoS statistics counters';
