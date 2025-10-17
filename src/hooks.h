@@ -25,7 +25,7 @@
 /* Hook registration & unregistration functions */
 extern void qos_register_hooks(void);
 extern void qos_unregister_hooks(void);
-extern void qos_check_and_enforce_limits(void);
+extern void qos_enforce_cpu_limit(void);
 extern void qos_enforce_work_mem_limit(VariableSetStmt *stmt);
 extern void qos_track_transaction_start(void);
 extern void qos_track_transaction_end(void);

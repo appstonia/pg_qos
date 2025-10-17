@@ -26,6 +26,12 @@
 #include "portability/instr_time.h"
 #include "nodes/parsenodes.h"
 #include "nodes/value.h"
+#include "access/xact.h"
+#include "utils/inval.h"
+#include "utils/syscache.h"
+#include "catalog/pg_authid.h"
+#include "catalog/pg_database.h"
+#include "catalog/pg_db_role_setting.h"
 #include <unistd.h>
 #include <sys/resource.h>
 #include <strings.h>
@@ -44,41 +50,120 @@ static ExecutorEnd_hook_type prev_ExecutorEnd = NULL;
 static bool transaction_tracked = false;
 static bool cpu_affinity_set = false;
 
+/* Cached QoS limits - invalidated via syscache callback */
+static QoSLimits cached_effective_limits = {-1, -1, -1};
+static Oid cached_user_id = InvalidOid;
+static Oid cached_db_id = InvalidOid;
+static bool limits_cached = false;
+
+/*
+ * Invalidation callback for pg_db_role_setting changes
+ * This is called automatically when ALTER ROLE/DATABASE changes settings
+ */
+static void
+qos_invalidate_cache_callback(Datum arg, int cacheid, uint32 hashvalue)
+{
+    /* Invalidate cache when database or role settings change */
+    if (cacheid == DATABASEOID || cacheid == AUTHOID)
+    {
+        limits_cached = false;
+        elog(DEBUG2, "qos: cache invalidated due to role/database configuration change");
+    }
+}
+
+/*
+ * Initialize or refresh cached limits for current session
+ * Cache is automatically invalidated via syscache callback when configs change
+ */
+static void
+qos_refresh_cached_limits(void)
+{
+    Oid current_user_id;
+    Oid current_db_id;
+    QoSLimits role_limits;
+    QoSLimits db_limits;
+    
+    current_user_id = GetUserId();
+    current_db_id = MyDatabaseId;
+    
+    /* Check if cache is still valid */
+    if (limits_cached && 
+        cached_user_id == current_user_id && 
+        cached_db_id == current_db_id)
+    {
+        return; /* Cache is valid */
+    }
+    
+    /* Refresh cache - query catalogs */
+    role_limits = qos_get_role_limits(current_user_id);
+    db_limits = qos_get_database_limits(current_db_id);
+    
+    /* Calculate effective limits (most restrictive) */
+    if (role_limits.work_mem_limit >= 0 && db_limits.work_mem_limit >= 0)
+        cached_effective_limits.work_mem_limit = Min(role_limits.work_mem_limit, db_limits.work_mem_limit);
+    else if (role_limits.work_mem_limit >= 0)
+        cached_effective_limits.work_mem_limit = role_limits.work_mem_limit;
+    else if (db_limits.work_mem_limit >= 0)
+        cached_effective_limits.work_mem_limit = db_limits.work_mem_limit;
+    else
+        cached_effective_limits.work_mem_limit = -1;
+        
+    if (role_limits.cpu_core_limit >= 0 && db_limits.cpu_core_limit >= 0)
+        cached_effective_limits.cpu_core_limit = Min(role_limits.cpu_core_limit, db_limits.cpu_core_limit);
+    else if (role_limits.cpu_core_limit >= 0)
+        cached_effective_limits.cpu_core_limit = role_limits.cpu_core_limit;
+    else if (db_limits.cpu_core_limit >= 0)
+        cached_effective_limits.cpu_core_limit = db_limits.cpu_core_limit;
+    else
+        cached_effective_limits.cpu_core_limit = -1;
+        
+    if (role_limits.max_concurrent_tx >= 0 && db_limits.max_concurrent_tx >= 0)
+        cached_effective_limits.max_concurrent_tx = Min(role_limits.max_concurrent_tx, db_limits.max_concurrent_tx);
+    else if (role_limits.max_concurrent_tx >= 0)
+        cached_effective_limits.max_concurrent_tx = role_limits.max_concurrent_tx;
+    else if (db_limits.max_concurrent_tx >= 0)
+        cached_effective_limits.max_concurrent_tx = db_limits.max_concurrent_tx;
+    else
+        cached_effective_limits.max_concurrent_tx = -1;
+    
+    cached_user_id = current_user_id;
+    cached_db_id = current_db_id;
+    limits_cached = true;
+    
+    elog(DEBUG2, "qos: cached limits refreshed - work_mem: %ld, cpu_cores: %d, max_tx: %d (user: %u, db: %u)",
+         cached_effective_limits.work_mem_limit,
+         cached_effective_limits.cpu_core_limit,
+         cached_effective_limits.max_concurrent_tx,
+         cached_user_id,
+         cached_db_id);
+}
+
+/*
+ * Get cached effective limits (refreshes if needed)
+ */
+static inline QoSLimits
+qos_get_cached_limits(void)
+{
+    qos_refresh_cached_limits();
+    return cached_effective_limits;
+}
+
 /*
  * Check and enforce resource limits for current session
  */
 void
-qos_check_and_enforce_limits(void)
+qos_enforce_cpu_limit(void)
 {
-    QoSLimits role_limits;
-    QoSLimits db_limits;
-    QoSLimits effective_limits;
+    QoSLimits limits;
     
     if (!qos_enabled)
         return;
     
-    /* Get limits for role and database */
-    role_limits = qos_get_role_limits(GetUserId());
-    db_limits = qos_get_database_limits(MyDatabaseId);
-    
-    /* Effective limits are the minimum (most restrictive) of role and db */
-    effective_limits.work_mem_limit = 
-        (role_limits.work_mem_limit >= 0 && db_limits.work_mem_limit >= 0) ?
-        Min(role_limits.work_mem_limit, db_limits.work_mem_limit) :
-        Max(role_limits.work_mem_limit, db_limits.work_mem_limit);
-        
-    effective_limits.cpu_core_limit = 
-        (role_limits.cpu_core_limit >= 0 && db_limits.cpu_core_limit >= 0) ?
-        Min(role_limits.cpu_core_limit, db_limits.cpu_core_limit) :
-        Max(role_limits.cpu_core_limit, db_limits.cpu_core_limit);
-        
-    effective_limits.max_concurrent_tx = 
-        (role_limits.max_concurrent_tx >= 0 && db_limits.max_concurrent_tx >= 0) ?
-        Min(role_limits.max_concurrent_tx, db_limits.max_concurrent_tx) :
-        Max(role_limits.max_concurrent_tx, db_limits.max_concurrent_tx);
+    /* Get cached limits - no catalog access needed */
+    limits = qos_get_cached_limits();
     
     /* Enforce CPU core limit using CPU affinity (Linux only) */
-    if (effective_limits.cpu_core_limit > 0 && !cpu_affinity_set)
+    if (limits.cpu_core_limit > 0 && !cpu_affinity_set)
     {
 #ifdef __linux__
         cpu_set_t cpuset;
@@ -86,7 +171,7 @@ qos_check_and_enforce_limits(void)
         
         CPU_ZERO(&cpuset);
         /* Set affinity to first N cores */
-        for (i = 0; i < effective_limits.cpu_core_limit && i < CPU_SETSIZE; i++)
+        for (i = 0; i < limits.cpu_core_limit && i < CPU_SETSIZE; i++)
         {
             CPU_SET(i, &cpuset);
         }
@@ -95,7 +180,7 @@ qos_check_and_enforce_limits(void)
         {
             cpu_affinity_set = true;
             elog(DEBUG1, "qos: limited user %u to %d CPU cores",
-                 GetUserId(), effective_limits.cpu_core_limit);
+                 GetUserId(), limits.cpu_core_limit);
         }
         else
         {
@@ -114,9 +199,7 @@ qos_check_and_enforce_limits(void)
 void
 qos_enforce_work_mem_limit(VariableSetStmt *stmt)
 {
-    QoSLimits role_limits;
-    QoSLimits db_limits;
-    int64 max_work_mem = -1;
+    QoSLimits limits;
     int new_work_mem_kb = 0;
     A_Const *arg;
     char *value_str = NULL;
@@ -131,19 +214,11 @@ qos_enforce_work_mem_limit(VariableSetStmt *stmt)
     if (!stmt || !stmt->name || strcmp(stmt->name, "work_mem") != 0 || stmt->kind != VAR_SET_VALUE)
         return;
     
-    role_limits = qos_get_role_limits(GetUserId());
-    db_limits = qos_get_database_limits(MyDatabaseId);
-    
-    /* Get most restrictive work_mem limit */
-    if (role_limits.work_mem_limit >= 0 && db_limits.work_mem_limit >= 0)
-        max_work_mem = Min(role_limits.work_mem_limit, db_limits.work_mem_limit);
-    else if (role_limits.work_mem_limit >= 0)
-        max_work_mem = role_limits.work_mem_limit;
-    else if (db_limits.work_mem_limit >= 0)
-        max_work_mem = db_limits.work_mem_limit;
+    /* Get cached limits - no catalog access needed */
+    limits = qos_get_cached_limits();
     
     /* Parse the new value */
-    if (max_work_mem >= 0 && stmt->args != NIL)
+    if (limits.work_mem_limit >= 0 && stmt->args != NIL)
     {
         arg = (A_Const *) linitial(stmt->args);
         
@@ -181,7 +256,7 @@ qos_enforce_work_mem_limit(VariableSetStmt *stmt)
         /* Check limit */
         new_work_mem_bytes = (int64)new_work_mem_kb * 1024L;
         
-        if (new_work_mem_bytes > max_work_mem)
+        if (new_work_mem_bytes > limits.work_mem_limit)
         {
             if (qos_shared_state)
             {
@@ -194,7 +269,7 @@ qos_enforce_work_mem_limit(VariableSetStmt *stmt)
                     (errcode(ERRCODE_INSUFFICIENT_RESOURCES),
                      errmsg("qos: work_mem limit exceeded"),
                      errdetail("Requested %d KB, maximum allowed is %ld KB",
-                              new_work_mem_kb, max_work_mem / 1024),
+                              new_work_mem_kb, limits.work_mem_limit / 1024),
                      errhint("Contact administrator to increase qos.work_mem_limit")));
         }
     }
@@ -206,29 +281,19 @@ qos_enforce_work_mem_limit(VariableSetStmt *stmt)
 void
 qos_track_transaction_start(void)
 {
-    QoSLimits role_limits;
-    QoSLimits db_limits;
-    int max_concurrent = -1;
+    QoSLimits limits;
     
     if (!qos_enabled || transaction_tracked)
         return;
     
-    role_limits = qos_get_role_limits(GetUserId());
-    db_limits = qos_get_database_limits(MyDatabaseId);
+    /* Get cached limits - no catalog access needed */
+    limits = qos_get_cached_limits();
     
-    /* Get most restrictive concurrent transaction limit */
-    if (role_limits.max_concurrent_tx >= 0 && db_limits.max_concurrent_tx >= 0)
-        max_concurrent = Min(role_limits.max_concurrent_tx, db_limits.max_concurrent_tx);
-    else if (role_limits.max_concurrent_tx >= 0)
-        max_concurrent = role_limits.max_concurrent_tx;
-    else if (db_limits.max_concurrent_tx >= 0)
-        max_concurrent = db_limits.max_concurrent_tx;    
-    
-    if (qos_shared_state && max_concurrent > 0)
+    if (qos_shared_state && limits.max_concurrent_tx > 0)
     {
         LWLockAcquire(qos_shared_state->lock, LW_EXCLUSIVE);
         
-        if (qos_shared_state->active_transactions >= max_concurrent)
+        if (qos_shared_state->active_transactions >= limits.max_concurrent_tx)
         {
             qos_shared_state->stats.concurrent_tx_violations++;
             qos_shared_state->stats.rejected_queries++;
@@ -238,7 +303,7 @@ qos_track_transaction_start(void)
                     (errcode(ERRCODE_TOO_MANY_CONNECTIONS),
                      errmsg("qos: maximum concurrent transactions exceeded"),
                      errdetail("Current: %d, Maximum: %d",
-                              qos_shared_state->active_transactions, max_concurrent),
+                              qos_shared_state->active_transactions, limits.max_concurrent_tx),
                      errhint("Wait for other transactions to complete")));
         }
         
@@ -310,7 +375,7 @@ static void
 qos_ExecutorStart(QueryDesc *queryDesc, int eflags)
 {
     /* Check and enforce limits at query start */
-    qos_check_and_enforce_limits();
+    qos_enforce_cpu_limit();
     
     /* Track transaction if not already tracked */
     qos_track_transaction_start();
@@ -354,7 +419,11 @@ qos_register_hooks(void)
     ExecutorStart_hook = qos_ExecutorStart;
     ExecutorEnd_hook = qos_ExecutorEnd;
     
-    elog(DEBUG1, "qos: hooks registered");
+    /* Register syscache invalidation callbacks for role and database changes */
+    CacheRegisterSyscacheCallback(DATABASEOID, qos_invalidate_cache_callback, (Datum) 0);
+    CacheRegisterSyscacheCallback(AUTHOID, qos_invalidate_cache_callback, (Datum) 0);
+    
+    elog(DEBUG1, "qos: hooks and cache callbacks registered");
 }
 
 /*
