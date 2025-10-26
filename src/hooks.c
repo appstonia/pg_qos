@@ -49,9 +49,11 @@ static ExecutorEnd_hook_type prev_ExecutorEnd = NULL;
 /* Per-backend transaction tracking */
 static bool transaction_tracked = false;
 static bool cpu_affinity_set = false;
+static CmdType current_statement_type = CMD_UNKNOWN;
+static bool statement_tracked = false;
 
 /* Cached QoS limits - invalidated via syscache callback */
-static QoSLimits cached_effective_limits = {-1, -1, -1};
+static QoSLimits cached_limits = {-1, -1, -1, -1, -1, -1, -1, -1, -1};
 static Oid cached_user_id = InvalidOid;
 static Oid cached_db_id = InvalidOid;
 static bool limits_cached = false;
@@ -98,42 +100,87 @@ qos_refresh_cached_limits(void)
     role_limits = qos_get_role_limits(current_user_id);
     db_limits = qos_get_database_limits(current_db_id);
     
-    /* Calculate effective limits (most restrictive) */
+    /* Calculate limits (most restrictive) */
+    // work_mem_limit
     if (role_limits.work_mem_limit >= 0 && db_limits.work_mem_limit >= 0)
-        cached_effective_limits.work_mem_limit = Min(role_limits.work_mem_limit, db_limits.work_mem_limit);
+        cached_limits.work_mem_limit = Min(role_limits.work_mem_limit, db_limits.work_mem_limit);
     else if (role_limits.work_mem_limit >= 0)
-        cached_effective_limits.work_mem_limit = role_limits.work_mem_limit;
+        cached_limits.work_mem_limit = role_limits.work_mem_limit;
     else if (db_limits.work_mem_limit >= 0)
-        cached_effective_limits.work_mem_limit = db_limits.work_mem_limit;
+        cached_limits.work_mem_limit = db_limits.work_mem_limit;
     else
-        cached_effective_limits.work_mem_limit = -1;
-        
-    if (role_limits.cpu_core_limit >= 0 && db_limits.cpu_core_limit >= 0)
-        cached_effective_limits.cpu_core_limit = Min(role_limits.cpu_core_limit, db_limits.cpu_core_limit);
-    else if (role_limits.cpu_core_limit >= 0)
-        cached_effective_limits.cpu_core_limit = role_limits.cpu_core_limit;
-    else if (db_limits.cpu_core_limit >= 0)
-        cached_effective_limits.cpu_core_limit = db_limits.cpu_core_limit;
-    else
-        cached_effective_limits.cpu_core_limit = -1;
-        
-    if (role_limits.max_concurrent_tx >= 0 && db_limits.max_concurrent_tx >= 0)
-        cached_effective_limits.max_concurrent_tx = Min(role_limits.max_concurrent_tx, db_limits.max_concurrent_tx);
-    else if (role_limits.max_concurrent_tx >= 0)
-        cached_effective_limits.max_concurrent_tx = role_limits.max_concurrent_tx;
-    else if (db_limits.max_concurrent_tx >= 0)
-        cached_effective_limits.max_concurrent_tx = db_limits.max_concurrent_tx;
-    else
-        cached_effective_limits.max_concurrent_tx = -1;
+        cached_limits.work_mem_limit = -1;
     
+    // cpu_core_limit
+    if (role_limits.cpu_core_limit >= 0 && db_limits.cpu_core_limit >= 0)
+        cached_limits.cpu_core_limit = Min(role_limits.cpu_core_limit, db_limits.cpu_core_limit);
+    else if (role_limits.cpu_core_limit >= 0)
+        cached_limits.cpu_core_limit = role_limits.cpu_core_limit;
+    else if (db_limits.cpu_core_limit >= 0)
+        cached_limits.cpu_core_limit = db_limits.cpu_core_limit;
+    else
+        cached_limits.cpu_core_limit = -1;
+    
+    // max_concurrent_tx
+    if (role_limits.max_concurrent_tx >= 0 && db_limits.max_concurrent_tx >= 0)
+        cached_limits.max_concurrent_tx = Min(role_limits.max_concurrent_tx, db_limits.max_concurrent_tx);
+    else if (role_limits.max_concurrent_tx >= 0)
+        cached_limits.max_concurrent_tx = role_limits.max_concurrent_tx;
+    else if (db_limits.max_concurrent_tx >= 0)
+        cached_limits.max_concurrent_tx = db_limits.max_concurrent_tx;
+    else
+        cached_limits.max_concurrent_tx = -1;
+    
+    /* Statement-specific concurrent limits */
+    // max_concurrent_select
+    if (role_limits.max_concurrent_select >= 0 && db_limits.max_concurrent_select >= 0)
+        cached_limits.max_concurrent_select = Min(role_limits.max_concurrent_select, db_limits.max_concurrent_select);
+    else if (role_limits.max_concurrent_select >= 0)
+        cached_limits.max_concurrent_select = role_limits.max_concurrent_select;
+    else if (db_limits.max_concurrent_select >= 0)
+        cached_limits.max_concurrent_select = db_limits.max_concurrent_select;
+    else
+        cached_limits.max_concurrent_select = -1;
+        
+    // max_concurrent_update    
+    if (role_limits.max_concurrent_update >= 0 && db_limits.max_concurrent_update >= 0)
+        cached_limits.max_concurrent_update = Min(role_limits.max_concurrent_update, db_limits.max_concurrent_update);
+    else if (role_limits.max_concurrent_update >= 0)
+        cached_limits.max_concurrent_update = role_limits.max_concurrent_update;
+    else if (db_limits.max_concurrent_update >= 0)
+        cached_limits.max_concurrent_update = db_limits.max_concurrent_update;
+    else
+        cached_limits.max_concurrent_update = -1;
+    
+    // max_concurrent_delete
+    if (role_limits.max_concurrent_delete >= 0 && db_limits.max_concurrent_delete >= 0)
+        cached_limits.max_concurrent_delete = Min(role_limits.max_concurrent_delete, db_limits.max_concurrent_delete);
+    else if (role_limits.max_concurrent_delete >= 0)
+        cached_limits.max_concurrent_delete = role_limits.max_concurrent_delete;
+    else if (db_limits.max_concurrent_delete >= 0)
+        cached_limits.max_concurrent_delete = db_limits.max_concurrent_delete;
+    else
+        cached_limits.max_concurrent_delete = -1;
+    
+    // max_concurrent_insert
+    if (role_limits.max_concurrent_insert >= 0 && db_limits.max_concurrent_insert >= 0)
+        cached_limits.max_concurrent_insert = Min(role_limits.max_concurrent_insert, db_limits.max_concurrent_insert);
+    else if (role_limits.max_concurrent_insert >= 0)
+        cached_limits.max_concurrent_insert = role_limits.max_concurrent_insert;
+    else if (db_limits.max_concurrent_insert >= 0)
+        cached_limits.max_concurrent_insert = db_limits.max_concurrent_insert;
+    else
+        cached_limits.max_concurrent_insert = -1;
+
+    /* Update cache metadata for each role and database*/
     cached_user_id = current_user_id;
     cached_db_id = current_db_id;
     limits_cached = true;
     
     elog(DEBUG2, "qos: cached limits refreshed - work_mem: %ld, cpu_cores: %d, max_tx: %d (user: %u, db: %u)",
-         cached_effective_limits.work_mem_limit,
-         cached_effective_limits.cpu_core_limit,
-         cached_effective_limits.max_concurrent_tx,
+         cached_limits.work_mem_limit,
+         cached_limits.cpu_core_limit,
+         cached_limits.max_concurrent_tx,
          cached_user_id,
          cached_db_id);
 }
@@ -145,7 +192,7 @@ static inline QoSLimits
 qos_get_cached_limits(void)
 {
     qos_refresh_cached_limits();
-    return cached_effective_limits;
+    return cached_limits;
 }
 
 /*
@@ -165,6 +212,7 @@ qos_enforce_cpu_limit(void)
     /* Enforce CPU core limit using CPU affinity (Linux only) */
     if (limits.cpu_core_limit > 0 && !cpu_affinity_set)
     {
+        //TODO: Add support for other OSes
 #ifdef __linux__
         cpu_set_t cpuset;
         int i;
@@ -338,6 +386,160 @@ qos_track_transaction_end(void)
 }
 
 /*
+ * Track statement start - for SELECT, UPDATE, DELETE, INSERT concurrency limits
+ */
+static void
+qos_track_statement_start(CmdType operation)
+{
+    QoSLimits limits;
+    
+    if (!qos_enabled || statement_tracked)
+        return;
+    
+    /* Only track SELECT, UPDATE, DELETE, INSERT */
+    if (operation != CMD_SELECT && operation != CMD_UPDATE && 
+        operation != CMD_DELETE && operation != CMD_INSERT)
+        return;
+    
+    limits = qos_get_cached_limits();
+    
+    if (qos_shared_state)
+    {
+        LWLockAcquire(qos_shared_state->lock, LW_EXCLUSIVE);
+        
+        /* Check and enforce statement-specific concurrent limits */
+        switch (operation)
+        {
+            case CMD_SELECT:
+                if (limits.max_concurrent_select > 0 && 
+                    qos_shared_state->active_selects >= limits.max_concurrent_select)
+                {
+                    qos_shared_state->stats.concurrent_select_violations++;
+                    qos_shared_state->stats.rejected_queries++;
+                    LWLockRelease(qos_shared_state->lock);
+                    
+                    ereport(ERROR,
+                            (errcode(ERRCODE_TOO_MANY_CONNECTIONS),
+                             errmsg("qos: maximum concurrent SELECT statements exceeded"),
+                             errdetail("Current: %d, Maximum: %d",
+                                      qos_shared_state->active_selects, limits.max_concurrent_select),
+                             errhint("Wait for other SELECT queries to complete")));
+                }
+                qos_shared_state->active_selects++;
+                break;
+                
+            case CMD_UPDATE:
+                if (limits.max_concurrent_update > 0 && 
+                    qos_shared_state->active_updates >= limits.max_concurrent_update)
+                {
+                    qos_shared_state->stats.concurrent_update_violations++;
+                    qos_shared_state->stats.rejected_queries++;
+                    LWLockRelease(qos_shared_state->lock);
+                    
+                    ereport(ERROR,
+                            (errcode(ERRCODE_TOO_MANY_CONNECTIONS),
+                             errmsg("qos: maximum concurrent UPDATE statements exceeded"),
+                             errdetail("Current: %d, Maximum: %d",
+                                      qos_shared_state->active_updates, limits.max_concurrent_update),
+                             errhint("Wait for other UPDATE queries to complete")));
+                }
+                qos_shared_state->active_updates++;
+                break;
+                
+            case CMD_DELETE:
+                if (limits.max_concurrent_delete > 0 && 
+                    qos_shared_state->active_deletes >= limits.max_concurrent_delete)
+                {
+                    qos_shared_state->stats.concurrent_delete_violations++;
+                    qos_shared_state->stats.rejected_queries++;
+                    LWLockRelease(qos_shared_state->lock);
+                    
+                    ereport(ERROR,
+                            (errcode(ERRCODE_TOO_MANY_CONNECTIONS),
+                             errmsg("qos: maximum concurrent DELETE statements exceeded"),
+                             errdetail("Current: %d, Maximum: %d",
+                                      qos_shared_state->active_deletes, limits.max_concurrent_delete),
+                             errhint("Wait for other DELETE queries to complete")));
+                }
+                qos_shared_state->active_deletes++;
+                break;
+                
+            case CMD_INSERT:
+                if (limits.max_concurrent_insert > 0 && 
+                    qos_shared_state->active_inserts >= limits.max_concurrent_insert)
+                {
+                    qos_shared_state->stats.concurrent_insert_violations++;
+                    qos_shared_state->stats.rejected_queries++;
+                    LWLockRelease(qos_shared_state->lock);
+                    
+                    ereport(ERROR,
+                            (errcode(ERRCODE_TOO_MANY_CONNECTIONS),
+                             errmsg("qos: maximum concurrent INSERT statements exceeded"),
+                             errdetail("Current: %d, Maximum: %d",
+                                      qos_shared_state->active_inserts, limits.max_concurrent_insert),
+                             errhint("Wait for other INSERT queries to complete")));
+                }
+                qos_shared_state->active_inserts++;
+                break;
+                
+            default:
+                break;
+        }
+        
+        current_statement_type = operation;
+        statement_tracked = true;
+        
+        LWLockRelease(qos_shared_state->lock);
+    }
+}
+
+/*
+ * Track statement end - decrement statement-specific counters
+ */
+static void
+qos_track_statement_end(void)
+{
+    if (!qos_enabled || !statement_tracked)
+        return;
+    
+    if (qos_shared_state)
+    {
+        LWLockAcquire(qos_shared_state->lock, LW_EXCLUSIVE);
+        
+        switch (current_statement_type)
+        {
+            case CMD_SELECT:
+                if (qos_shared_state->active_selects > 0)
+                    qos_shared_state->active_selects--;
+                break;
+                
+            case CMD_UPDATE:
+                if (qos_shared_state->active_updates > 0)
+                    qos_shared_state->active_updates--;
+                break;
+                
+            case CMD_DELETE:
+                if (qos_shared_state->active_deletes > 0)
+                    qos_shared_state->active_deletes--;
+                break;
+                
+            case CMD_INSERT:
+                if (qos_shared_state->active_inserts > 0)
+                    qos_shared_state->active_inserts--;
+                break;
+                
+            default:
+                break;
+        }
+        
+        LWLockRelease(qos_shared_state->lock);
+    }
+    
+    statement_tracked = false;
+    current_statement_type = CMD_UNKNOWN;
+}
+
+/*
  * ProcessUtility hook - intercept SET commands
  */
 static void
@@ -380,6 +582,15 @@ qos_ExecutorStart(QueryDesc *queryDesc, int eflags)
     /* Track transaction if not already tracked */
     qos_track_transaction_start();
     
+    /* Track statement-specific concurrency (SELECT, UPDATE, DELETE, INSERT) */
+    if (queryDesc->operation == CMD_SELECT || 
+        queryDesc->operation == CMD_UPDATE || 
+        queryDesc->operation == CMD_DELETE ||
+        queryDesc->operation == CMD_INSERT)
+    {
+        qos_track_statement_start(queryDesc->operation);
+    }
+    
     /* Call previous hook or standard executor */
     if (prev_ExecutorStart)
         prev_ExecutorStart(queryDesc, eflags);
@@ -388,7 +599,7 @@ qos_ExecutorStart(QueryDesc *queryDesc, int eflags)
 }
 
 /*
- * ExecutorEnd hook - track transaction end
+ * ExecutorEnd hook - track transaction end and statement end
  */
 static void
 qos_ExecutorEnd(QueryDesc *queryDesc)
@@ -398,6 +609,9 @@ qos_ExecutorEnd(QueryDesc *queryDesc)
         prev_ExecutorEnd(queryDesc);
     else
         standard_ExecutorEnd(queryDesc);
+    
+    /* Decrement statement counter */
+    qos_track_statement_end();
     
     /* Decrement transaction counter when query completes */
     qos_track_transaction_end();

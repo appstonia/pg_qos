@@ -166,7 +166,15 @@ parse_role_configs(ArrayType *configs, QoSLimits *limits)
             else if (strcmp(name, "qos.cpu_core_limit") == 0)
                 limits->cpu_core_limit = atoi(value);
             else if (strcmp(name, "qos.max_concurrent_tx") == 0)
-                limits->max_concurrent_tx = atoi(value);            
+                limits->max_concurrent_tx = atoi(value);
+            else if (strcmp(name, "qos.max_concurrent_select") == 0)
+                limits->max_concurrent_select = atoi(value);
+            else if (strcmp(name, "qos.max_concurrent_update") == 0)
+                limits->max_concurrent_update = atoi(value);
+            else if (strcmp(name, "qos.max_concurrent_delete") == 0)
+                limits->max_concurrent_delete = atoi(value);
+            else if (strcmp(name, "qos.max_concurrent_insert") == 0)
+                limits->max_concurrent_insert = atoi(value);            
         }
         
         pfree(config_str);
@@ -191,7 +199,13 @@ qos_get_role_limits(Oid roleId)
     /* Set defaults */
     limits.work_mem_limit = -1;
     limits.cpu_core_limit = -1;
-    limits.max_concurrent_tx = -1;    
+    limits.max_concurrent_tx = -1;
+    limits.temp_file_limit = -1;
+    limits.io_limit_mbps = -1;
+    limits.max_concurrent_select = -1;
+    limits.max_concurrent_update = -1;
+    limits.max_concurrent_delete = -1;
+    limits.max_concurrent_insert = -1;
     
     /* Open pg_db_role_setting catalog */
     pg_db_role_setting_rel = table_open(DbRoleSettingRelationId, AccessShareLock);
@@ -246,7 +260,13 @@ qos_get_database_limits(Oid dbId)
     /* Set defaults */
     limits.work_mem_limit = -1;
     limits.cpu_core_limit = -1;
-    limits.max_concurrent_tx = -1;    
+    limits.max_concurrent_tx = -1;
+    limits.temp_file_limit = -1;
+    limits.io_limit_mbps = -1;
+    limits.max_concurrent_select = -1;
+    limits.max_concurrent_update = -1;
+    limits.max_concurrent_delete = -1;
+    limits.max_concurrent_insert = -1;
     
     /* Open pg_db_role_setting catalog */
     pg_db_role_setting_rel = table_open(DbRoleSettingRelationId, AccessShareLock);

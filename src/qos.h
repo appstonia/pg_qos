@@ -31,6 +31,12 @@ typedef struct QoSLimits
     int     max_concurrent_tx;     /* Max concurrent transactions (-1 = no limit) */
     int64   temp_file_limit;       /* Max temp file size in bytes (-1 = no limit) */
     int     io_limit_mbps;         /* I/O bandwidth limit in MB/s (-1 = no limit) */
+    
+    /* Statement-specific concurrent execution limits */
+    int     max_concurrent_select; /* Max concurrent SELECT statements (-1 = no limit) */
+    int     max_concurrent_update; /* Max concurrent UPDATE statements (-1 = no limit) */
+    int     max_concurrent_delete; /* Max concurrent DELETE statements (-1 = no limit) */
+    int     max_concurrent_insert; /* Max concurrent INSERT statements (-1 = no limit) */
 } QoSLimits;
 
 /* QoS Statistics */
@@ -42,6 +48,10 @@ typedef struct QoSStats
     uint64  work_mem_violations;
     uint64  cpu_violations;
     uint64  concurrent_tx_violations;
+    uint64  concurrent_select_violations;
+    uint64  concurrent_update_violations;
+    uint64  concurrent_delete_violations;
+    uint64  concurrent_insert_violations;
 } QoSStats;
 
 /* Shared State */
@@ -49,6 +59,10 @@ typedef struct QoSSharedState
 {
     LWLock     *lock;
     int         active_transactions;
+    int         active_selects;     /* Number of active SELECT statements */
+    int         active_updates;     /* Number of active UPDATE statements */
+    int         active_deletes;     /* Number of active DELETE statements */
+    int         active_inserts;     /* Number of active INSERT statements */
     QoSStats    stats;
 } QoSSharedState;
 
