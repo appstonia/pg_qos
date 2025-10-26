@@ -28,9 +28,7 @@ typedef struct QoSLimits
 {
     int64   work_mem_limit;        /* Max work_mem in bytes (-1 = no limit) */
     int     cpu_core_limit;        /* Max CPU cores (-1 = no limit) */
-    int     max_concurrent_tx;     /* Max concurrent transactions (-1 = no limit) */
-    int64   temp_file_limit;       /* Max temp file size in bytes (-1 = no limit) */
-    int     io_limit_mbps;         /* I/O bandwidth limit in MB/s (-1 = no limit) */
+    int     max_concurrent_tx;     /* Max concurrent transactions (-1 = no limit) */    
     
     /* Statement-specific concurrent execution limits */
     int     max_concurrent_select; /* Max concurrent SELECT statements (-1 = no limit) */

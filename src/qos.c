@@ -199,9 +199,7 @@ qos_get_role_limits(Oid roleId)
     /* Set defaults */
     limits.work_mem_limit = -1;
     limits.cpu_core_limit = -1;
-    limits.max_concurrent_tx = -1;
-    limits.temp_file_limit = -1;
-    limits.io_limit_mbps = -1;
+    limits.max_concurrent_tx = -1;    
     limits.max_concurrent_select = -1;
     limits.max_concurrent_update = -1;
     limits.max_concurrent_delete = -1;
@@ -260,9 +258,7 @@ qos_get_database_limits(Oid dbId)
     /* Set defaults */
     limits.work_mem_limit = -1;
     limits.cpu_core_limit = -1;
-    limits.max_concurrent_tx = -1;
-    limits.temp_file_limit = -1;
-    limits.io_limit_mbps = -1;
+    limits.max_concurrent_tx = -1;    
     limits.max_concurrent_select = -1;
     limits.max_concurrent_update = -1;
     limits.max_concurrent_delete = -1;
