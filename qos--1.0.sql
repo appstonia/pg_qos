@@ -26,9 +26,9 @@ RETURNS void
 LANGUAGE C STRICT
 AS '$libdir/qos', 'qos_reset_stats';
 
--- View: qos_role_settings
--- Shows current QoS settings for all roles using pg_db_role_setting
-CREATE VIEW qos_role_settings AS
+-- View: qos_rsettings
+-- Shows current QoS settings for all roles and databases using pg_db_role_setting
+CREATE VIEW qos_settings AS
 SELECT 
     COALESCE(r.rolname, 'database-wide') as rolname,
     COALESCE(d.datname, 'cluster-wide') as datname,
@@ -38,18 +38,6 @@ LEFT JOIN pg_roles r ON r.oid = s.setrole
 LEFT JOIN pg_database d ON d.oid = s.setdatabase,
 LATERAL unnest(s.setconfig) cfg
 WHERE cfg LIKE 'qos.%';
-
--- View: qos_database_settings  
--- Shows QoS settings by database
-CREATE VIEW qos_database_settings AS
-SELECT 
-    d.datname,
-    cfg as setting
-FROM pg_db_role_setting s
-JOIN pg_database d ON d.oid = s.setdatabase,
-LATERAL unnest(s.setconfig) cfg
-WHERE s.setrole = 0  -- Database-level only
-  AND cfg LIKE 'qos.%';
 
 -- Extension metadata
 COMMENT ON EXTENSION qos IS 'PostgreSQL Quality of Service (QoS) Resource Governor';
