@@ -70,7 +70,7 @@ Datum
 qos_get_stats(PG_FUNCTION_ARGS)
 {
     /* TODO: Return current QoS statistics */
-    PG_RETURN_TEXT_P(cstring_to_text("not yet implemented"));
+    PG_RETURN_TEXT_P(cstring_to_text("not implemented yet"));
 }
 
 Datum
