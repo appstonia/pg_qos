@@ -53,7 +53,6 @@ shmem_request_hook_type prev_shmem_request_hook = NULL;
 /* Forward declarations */
 static void qos_shmem_request(void);
 static void qos_shmem_startup(void);
-static int64 parse_memory_unit(const char *str);
 static void parse_role_configs(ArrayType *configs, QoSLimits *limits);
 
 PG_FUNCTION_INFO_V1(qos_version);
@@ -162,7 +161,7 @@ parse_role_configs(ArrayType *configs, QoSLimits *limits)
             value++;
             
             if (strcmp(name, "qos.work_mem_limit") == 0)
-                limits->work_mem_limit = parse_memory_unit(value);
+                limits->work_mem_limit = qos_parse_memory_unit(value);
             else if (strcmp(name, "qos.cpu_core_limit") == 0)
                 limits->cpu_core_limit = atoi(value);
             else if (strcmp(name, "qos.max_concurrent_tx") == 0)
@@ -312,9 +311,10 @@ qos_get_database_limits(Oid dbId)
 
 /*
  * Parse memory unit string (e.g., "64MB", "1GB")
+ * Public function - can be used by other modules
  */
-static int64
-parse_memory_unit(const char *str)
+int64
+qos_parse_memory_unit(const char *str)
 {
     char *endptr;
     int64 value = strtol(str, &endptr, 10);

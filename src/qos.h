@@ -80,5 +80,6 @@ extern Datum qos_reset_stats(PG_FUNCTION_ARGS);
 /* Function declarations */
 extern QoSLimits qos_get_role_limits(Oid roleId);
 extern QoSLimits qos_get_database_limits(Oid dbId);
+extern int64 qos_parse_memory_unit(const char *str);
 
 #endif /* QOS_H */

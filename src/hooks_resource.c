@@ -81,11 +81,8 @@ void
 qos_enforce_work_mem_limit(VariableSetStmt *stmt)
 {
     QoSLimits limits;
-    int new_work_mem_kb = 0;
     A_Const *arg;
     char *value_str = NULL;
-    char *endptr;
-    int64 value;
     int64 new_work_mem_bytes;
     
     if (!qos_enabled)
@@ -98,45 +95,32 @@ qos_enforce_work_mem_limit(VariableSetStmt *stmt)
     /* Get cached limits - no catalog access needed */
     limits = qos_get_cached_limits();
     
+    /* Check if limit is enabled */
+    if (limits.work_mem_limit < 0 || stmt->args == NIL)
+        return;
+    
     /* Parse the new value */
-    if (limits.work_mem_limit >= 0 && stmt->args != NIL)
+    arg = (A_Const *) linitial(stmt->args);
+    
+    if (IsA(arg, A_Const))
     {
-        arg = (A_Const *) linitial(stmt->args);
-        
-        if (IsA(arg, A_Const))
+        if (nodeTag(&arg->val) == T_Integer)
         {
-            if (nodeTag(&arg->val) == T_Integer)
-            {
-                new_work_mem_kb = intVal(&arg->val);
-            }
-            else if (nodeTag(&arg->val) == T_String)
-            {
-                value_str = strVal(&arg->val);
-                /* Parse memory value like "128MB" */
-                value = strtol(value_str, &endptr, 10);
-                
-                if (*endptr != '\0')
-                {
-                    /* Has unit suffix */
-                    if (strcasecmp(endptr, "kb") == 0 || strcasecmp(endptr, "kB") == 0)
-                        new_work_mem_kb = value;
-                    else if (strcasecmp(endptr, "mb") == 0 || strcasecmp(endptr, "MB") == 0)
-                        new_work_mem_kb = value * 1024;
-                    else if (strcasecmp(endptr, "gb") == 0 || strcasecmp(endptr, "GB") == 0)
-                        new_work_mem_kb = value * 1024 * 1024;
-                    else
-                        new_work_mem_kb = value; /* Assume KB */
-                }
-                else
-                {
-                    new_work_mem_kb = value; /* No unit = KB */
-                }
-            }
+            /* Integer value in KB */
+            new_work_mem_bytes = (int64)intVal(&arg->val) * 1024L;
+        }
+        else if (nodeTag(&arg->val) == T_String)
+        {
+            /* String value like "128MB" - use shared parser */
+            value_str = strVal(&arg->val);
+            new_work_mem_bytes = qos_parse_memory_unit(value_str);
+        }
+        else
+        {
+            return; /* Unknown value type */
         }
         
         /* Check limit */
-        new_work_mem_bytes = (int64)new_work_mem_kb * 1024L;
-        
         if (new_work_mem_bytes > limits.work_mem_limit)
         {
             if (qos_shared_state)
@@ -149,8 +133,8 @@ qos_enforce_work_mem_limit(VariableSetStmt *stmt)
             ereport(ERROR,
                     (errcode(ERRCODE_INSUFFICIENT_RESOURCES),
                      errmsg("qos: work_mem limit exceeded"),
-                     errdetail("Requested %d KB, maximum allowed is %ld KB",
-                              new_work_mem_kb, limits.work_mem_limit / 1024),
+                     errdetail("Requested %ld KB, maximum allowed is %ld KB",
+                              new_work_mem_bytes / 1024, limits.work_mem_limit / 1024),
                      errhint("Contact administrator to increase qos.work_mem_limit")));
         }
     }
