@@ -125,10 +125,11 @@ qos_track_statement_start(CmdType operation)
                 break;
         }
         
+        LWLockRelease(qos_shared_state->lock);
+        
+        /* Only set tracking flags after successful increment */
         current_statement_type = operation;
         statement_tracked = true;
-        
-        LWLockRelease(qos_shared_state->lock);
     }
 }
 

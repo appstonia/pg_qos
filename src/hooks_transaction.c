@@ -55,9 +55,11 @@ qos_track_transaction_start(void)
         
         qos_shared_state->active_transactions++;
         qos_shared_state->stats.total_queries++;
-        transaction_tracked = true;
         
         LWLockRelease(qos_shared_state->lock);
+        
+        /* Only set tracking flag after successful increment */
+        transaction_tracked = true;
     }
 }
 

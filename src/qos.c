@@ -234,6 +234,10 @@ qos_get_role_limits(Oid roleId)
         {
             ArrayType *configs = DatumGetArrayTypeP(configDatum);
             parse_role_configs(configs, &limits);
+            
+            /* Free detoasted copy if it was created */
+            if ((Pointer) configs != DatumGetPointer(configDatum))
+                pfree(configs);
         }
     }
     
@@ -293,6 +297,10 @@ qos_get_database_limits(Oid dbId)
         {
             ArrayType *configs = DatumGetArrayTypeP(configDatum);
             parse_role_configs(configs, &limits);
+            
+            /* Free detoasted copy if it was created */
+            if ((Pointer) configs != DatumGetPointer(configDatum))
+                pfree(configs);
         }
     }
     
