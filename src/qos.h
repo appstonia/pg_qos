@@ -62,6 +62,7 @@ typedef struct QoSSharedState
     int         active_deletes;     /* Number of active DELETE statements */
     int         active_inserts;     /* Number of active INSERT statements */
     QoSStats    stats;
+    int         settings_epoch;     /* Bumped on ALTER ROLE/DB SET qos.* to notify sessions */
 } QoSSharedState;
 
 /* Global variables */
@@ -81,5 +82,7 @@ extern Datum qos_reset_stats(PG_FUNCTION_ARGS);
 extern QoSLimits qos_get_role_limits(Oid roleId);
 extern QoSLimits qos_get_database_limits(Oid dbId);
 extern int64 qos_parse_memory_unit(const char *str);
+/* cache/epoch notifications */
+extern void qos_notify_settings_change(void);
 
 #endif /* QOS_H */

@@ -22,12 +22,15 @@
 #include "utils/syscache.h"
 #include "catalog/pg_authid.h"
 #include "catalog/pg_database.h"
+#include "catalog/pg_db_role_setting.h"
+#include "access/xact.h"
 
 /* Cached QoS limits - invalidated via syscache callback */
 static QoSLimits cached_limits = {-1, -1, -1, -1, -1, -1, -1};
 static Oid cached_user_id = InvalidOid;
 static Oid cached_db_id = InvalidOid;
 static bool limits_cached = false;
+static int last_seen_epoch = -1; /* session-local view of shared settings epoch */
 
 /*
  * Invalidation callback for pg_db_role_setting changes
@@ -40,8 +43,20 @@ qos_invalidate_cache_callback(Datum arg, int cacheid, uint32 hashvalue)
     if (cacheid == DATABASEOID || cacheid == AUTHOID)
     {
         limits_cached = false;
-        elog(DEBUG2, "qos: cache invalidated due to role/database configuration change");
+        elog(DEBUG1, "qos: cache invalidated via syscache (cacheid=%d)", cacheid);
     }
+}
+
+/*
+ * Relcache invalidation callback for pg_db_role_setting changes
+ * Captures ALTER ROLE/DATABASE SET updates
+ */
+static void
+qos_relcache_callback(Datum arg, Oid relid)
+{
+    /* Invalidate cache on any relcache event; pg_db_role_setting may pass InvalidOid */
+    limits_cached = false;
+    elog(DEBUG1, "qos: cache invalidated via relcache (relid=%u)", relid);
 }
 
 /*
@@ -53,6 +68,9 @@ qos_init_cache(void)
     /* Register syscache invalidation callbacks for role and database changes */
     CacheRegisterSyscacheCallback(DATABASEOID, qos_invalidate_cache_callback, (Datum) 0);
     CacheRegisterSyscacheCallback(AUTHOID, qos_invalidate_cache_callback, (Datum) 0);
+
+    /* Register relcache callback for pg_db_role_setting changes (ALTER ... SET) */
+    CacheRegisterRelcacheCallback(qos_relcache_callback, (Datum) 0);
 }
 
 /*
@@ -62,6 +80,23 @@ void
 qos_invalidate_cache(void)
 {
     limits_cached = false;
+}
+
+/*
+ * Notify that QoS settings changed (called from utility hook)
+ * Bumps shared epoch so all sessions detect the change promptly
+ */
+void
+qos_notify_settings_change(void)
+{
+    if (!qos_shared_state)
+        return;
+
+    LWLockAcquire(qos_shared_state->lock, LW_EXCLUSIVE);
+    qos_shared_state->settings_epoch++;
+    LWLockRelease(qos_shared_state->lock);
+
+    elog(DEBUG1, "qos: settings_epoch bumped to %d", qos_shared_state->settings_epoch);
 }
 
 /*
@@ -79,13 +114,18 @@ qos_refresh_cached_limits(void)
     current_user_id = GetUserId();
     current_db_id = MyDatabaseId;
     
-    /* Check if cache is still valid */
-    if (limits_cached && 
-        cached_user_id == current_user_id && 
-        cached_db_id == current_db_id)
+    /* If shared settings epoch changed, force invalidate */
+    if (qos_shared_state && last_seen_epoch != qos_shared_state->settings_epoch)
     {
-        return; /* Cache is valid */
+        elog(DEBUG1, "qos: settings_epoch changed %d -> %d, invalidating cache",
+             last_seen_epoch, qos_shared_state->settings_epoch);
+        limits_cached = false;
+        last_seen_epoch = qos_shared_state->settings_epoch;
     }
+
+    /* If cache still valid for same user/db, return */
+    if (limits_cached && cached_user_id == current_user_id && cached_db_id == current_db_id)
+        return;
     
     /* Refresh cache - query catalogs */
     role_limits = qos_get_role_limits(current_user_id);
@@ -117,12 +157,12 @@ qos_refresh_cached_limits(void)
     cached_db_id = current_db_id;
     limits_cached = true;
     
-    elog(DEBUG2, "qos: cached limits refreshed - work_mem: %ld, cpu_cores: %d, max_tx: %d (user: %u, db: %u)",
-         cached_limits.work_mem_limit,
-         cached_limits.cpu_core_limit,
-         cached_limits.max_concurrent_tx,
-         cached_user_id,
-         cached_db_id);
+    elog(DEBUG1, "qos: cached limits refreshed - work_mem: %ld, cpu_cores: %d, max_tx: %d (user: %u, db: %u)",
+        cached_limits.work_mem_limit,
+        cached_limits.cpu_core_limit,
+        cached_limits.max_concurrent_tx,
+        cached_user_id,
+        cached_db_id);
 }
 
 /*

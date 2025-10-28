@@ -119,6 +119,7 @@ qos_shmem_startup(void)
         /* Initialize shared state */
         memset(qos_shared_state, 0, sizeof(QoSSharedState));
         qos_shared_state->lock = &(GetNamedLWLockTranche("qos")->lock);
+        qos_shared_state->settings_epoch = 0;
     }
     
     LWLockRelease(AddinShmemInitLock);

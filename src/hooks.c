@@ -58,12 +58,35 @@ qos_ProcessUtility(PlannedStmt *pstmt,
                    QueryCompletion *qc)
 {
     Node *parsetree = pstmt->utilityStmt;
+    bool bump_epoch_after = false;
+    VariableSetStmt *qos_set = NULL;
     
     /* Check if setting work_mem - delegates to hooks_resource.c */
     if (qos_enabled && IsA(parsetree, VariableSetStmt))
     {
         VariableSetStmt *stmt = (VariableSetStmt *) parsetree;
         qos_enforce_work_mem_limit(stmt);
+    }
+
+    /* Detect ALTER ROLE/DB ... SET qos.* to bump global settings epoch */
+    if (qos_enabled)
+    {
+        if (IsA(parsetree, AlterRoleSetStmt))
+        {
+            AlterRoleSetStmt *as = (AlterRoleSetStmt *) parsetree;
+            qos_set = as->setstmt;
+        }
+        else if (IsA(parsetree, AlterDatabaseSetStmt))
+        {
+            AlterDatabaseSetStmt *as = (AlterDatabaseSetStmt *) parsetree;
+            qos_set = as->setstmt;
+        }
+
+        if (qos_set && ((qos_set->name && pg_strncasecmp(qos_set->name, "qos.", 4) == 0) ||
+                        qos_set->kind == VAR_RESET_ALL))
+        {
+            bump_epoch_after = true;
+        }
     }
     
     /* Call previous hook or standard utility */
@@ -73,6 +96,10 @@ qos_ProcessUtility(PlannedStmt *pstmt,
     else
         standard_ProcessUtility(pstmt, queryString, readOnlyTree, context,
                               params, queryEnv, dest, qc);
+
+    /* If relevant QoS setting changed successfully, bump epoch so others reload */
+    if (bump_epoch_after)
+        qos_notify_settings_change();
 }
 
 /*
