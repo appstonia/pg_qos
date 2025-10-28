@@ -26,11 +26,23 @@
 #include "tcop/utility.h"
 #include "executor/executor.h"
 #include "nodes/parsenodes.h"
+#include "optimizer/planner.h"
 
 /* Hook save variables */
 static ProcessUtility_hook_type prev_ProcessUtility = NULL;
 static ExecutorStart_hook_type prev_ExecutorStart = NULL;
 static ExecutorEnd_hook_type prev_ExecutorEnd = NULL;
+static planner_hook_type prev_planner_hook = NULL;
+
+/*
+ * Planner hook - delegates to hooks_resource.c for CPU limit enforcement
+ */
+static PlannedStmt *
+qos_planner(Query *parse, const char *query_string, int cursorOptions, ParamListInfo boundParams)
+{
+    /* Delegate to hooks_resource.c for parallel worker adjustment */
+    return qos_planner_hook(parse, query_string, cursorOptions, boundParams, prev_planner_hook);
+}
 
 /*
  * ProcessUtility hook - intercept SET commands
@@ -120,11 +132,13 @@ qos_register_hooks(void)
     prev_ProcessUtility = ProcessUtility_hook;
     prev_ExecutorStart = ExecutorStart_hook;
     prev_ExecutorEnd = ExecutorEnd_hook;
+    prev_planner_hook = planner_hook;
     
     /* Install our hooks */
     ProcessUtility_hook = qos_ProcessUtility;
     ExecutorStart_hook = qos_ExecutorStart;
     ExecutorEnd_hook = qos_ExecutorEnd;
+    planner_hook = qos_planner;
     
     /* Initialize cache system with syscache invalidation callbacks */
     qos_init_cache();
@@ -142,6 +156,7 @@ qos_unregister_hooks(void)
     ProcessUtility_hook = prev_ProcessUtility;
     ExecutorStart_hook = prev_ExecutorStart;
     ExecutorEnd_hook = prev_ExecutorEnd;
+    planner_hook = prev_planner_hook;
     
     elog(DEBUG1, "qos: hooks unregistered");
 }

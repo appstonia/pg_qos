@@ -19,6 +19,8 @@
 
 #include "postgres.h"
 #include "nodes/parsenodes.h"
+#include "nodes/plannodes.h"
+#include "optimizer/planner.h"
 #include "qos.h"
 
 /* Cache management */
@@ -37,5 +39,8 @@ extern void qos_track_transaction_end(void);
 /* Resource enforcement functions (hooks_resource.c) */
 extern void qos_enforce_cpu_limit(void);
 extern void qos_enforce_work_mem_limit(VariableSetStmt *stmt);
+extern PlannedStmt *qos_planner_hook(Query *parse, const char *query_string, 
+                                      int cursorOptions, ParamListInfo boundParams,
+                                      planner_hook_type prev_hook);
 
 #endif /* QOS_HOOKS_INTERNAL_H */
