@@ -4,9 +4,7 @@ PostgreSQL extension that provides Quality of Service (QoS) style resource gover
 
 - Enforce per-role and per-database limits via `ALTER ROLE/DATABASE SET qos.*`
 - Limit work_mem per session
-- Limit CPU usage with a two-layer approach:
-  - Limit parallel workers planned/launched (planner hook)
-  - Bind backend to N CPU cores (CPU affinity, Linux only)
+- Limit CPU usage by binding the backend to N CPU cores (CPU affinity, Linux only); planner integration ensures parallel workers stay within that cap
 - Track and cap concurrent transactions and statements (SELECT/UPDATE/DELETE/INSERT)
 - Fast, reliable cache invalidation across sessions (no reconnect) using a shared epoch mechanism
 
@@ -103,8 +101,9 @@ Effective limits are the most restrictive combination of role-level and database
   - Intercepts `SET work_mem` and rejects values above `qos.work_mem_limit`.
 
 - CPU limiting
-  - Planner hook reduces `Gather/Gather Merge` `num_workers` to respect `qos.cpu_core_limit - 1` (one core for the main backend).
-  - On Linux, the backend can also be bound to the first N CPU cores (optional CPU affinity) to restrict total CPU use.
+  - On Linux, QoS binds the backend to the first N CPU cores (CPU affinity) to cap total CPU usage per session.
+  - The planner hook ensures `Gather`/`Gather Merge` parallel workers do not exceed the allowed cores so parallelism respects the cap.
+  - On non-Linux platforms, only the planner effect applies.
 
 - Concurrency limits
   - Executor hooks track active transactions and statements per command type; caps are enforced against configured maxima.
