@@ -103,15 +103,12 @@ Effective limits are the most restrictive combination of role-level and database
   - Intercepts `SET work_mem` and rejects values above `qos.work_mem_limit`.
 
 - CPU limiting
-  - Planner hook reduces `Gather/GatherMerge` `num_workers` to respect `qos.cpu_core_limit - 1` (one core for the main backend).
+  - Planner hook reduces `Gather/Gather Merge` `num_workers` to respect `qos.cpu_core_limit - 1` (one core for the main backend).
   - On Linux, the backend can also be bound to the first N CPU cores (optional CPU affinity) to restrict total CPU use.
 
 - Concurrency limits
   - Executor hooks track active transactions and statements per command type; caps are enforced against configured maxima.
 
-- Cache invalidation (no reconnect needed)
-  - On `ALTER ROLE/ALTER DATABASE SET/RESET qos.*`, a shared `settings_epoch` is bumped.
-  - Each session observes `settings_epoch` and refreshes its cached limits on the next statement automatically.
 
 ## Observability and Logging
 
