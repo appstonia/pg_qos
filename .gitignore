@@ -5,3 +5,4 @@
 *.a
 *.pyc
 .DS_Store
+build.sh
