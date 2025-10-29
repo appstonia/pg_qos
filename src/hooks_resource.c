@@ -24,16 +24,26 @@
 #include "storage/lwlock.h"
 #include "utils/guc.h"
 #include <strings.h>
+#include <unistd.h>
 
 #ifdef __linux__
 #include <sched.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <linux/perf_event.h>
+#include <sys/syscall.h>
+#include <sys/ioctl.h>
+#include <errno.h>
 #endif
-
-/* Per-backend resource tracking */
-static bool cpu_affinity_set = false;
 
 /* Forward declarations */
 static void qos_adjust_parallel_workers(Plan *plan, int max_workers);
+#ifdef __linux__
+static int qos_select_least_busy_cores(int *selected_cores, int requested_cores, int total_cores);
+static long qos_measure_cpu_cycles(int cpu);
+static int qos_get_or_assign_cores(Oid database_oid, Oid role_oid, int requested_cores, 
+                                     int total_cores, int *assigned_cores);
+#endif
 
 /*
  * Planner hook wrapper - adjust parallel workers based on CPU limits
@@ -112,7 +122,7 @@ qos_adjust_parallel_workers(Plan *plan, int max_workers)
         GatherMerge *gather_merge = (GatherMerge *) plan;
         if (gather_merge->num_workers > max_workers)
         {
-            elog(DEBUG3, "qos: limiting GatherMerge workers from %d to %d",
+            elog(DEBUG3, "qos: limiting Gather Merge workers from %d to %d",
                  gather_merge->num_workers, max_workers);
             gather_merge->num_workers = max_workers;
         }
@@ -123,10 +133,274 @@ qos_adjust_parallel_workers(Plan *plan, int max_workers)
     qos_adjust_parallel_workers(plan->righttree, max_workers);
 }
 
+#ifdef __linux__
+/*
+ * Measure CPU cycles for a specific CPU core using perf_event_open
+ * Returns the number of cycles (lower = less busy), or -1 on error
+ */
+static long
+qos_measure_cpu_cycles(int cpu)
+{
+    struct perf_event_attr pe;
+    int fd;
+    long long count;
+    ssize_t bytes_read;
+    
+    memset(&pe, 0, sizeof(struct perf_event_attr));
+    pe.type = PERF_TYPE_HARDWARE;
+    pe.size = sizeof(struct perf_event_attr);
+    pe.config = PERF_COUNT_HW_CPU_CYCLES;
+    pe.disabled = 1;
+    pe.exclude_kernel = 0;
+    pe.exclude_hv = 1;
+    
+    /* Open perf event for specific CPU */
+    fd = syscall(__NR_perf_event_open, &pe, -1, cpu, -1, 0);
+    if (fd == -1)
+    {
+        /* Permission denied or not supported - fallback to random */
+        return -1;
+    }
+    
+    /* Enable and read cycles */
+    ioctl(fd, PERF_EVENT_IOC_RESET, 0);
+    ioctl(fd, PERF_EVENT_IOC_ENABLE, 0);
+    usleep(1000); /* Sample for 1ms */
+    ioctl(fd, PERF_EVENT_IOC_DISABLE, 0);
+    
+    bytes_read = read(fd, &count, sizeof(long long));
+    close(fd);
+    
+    if (bytes_read != sizeof(long long))
+        return -1;
+    
+    return (long) count;
+}
+
+/*
+ * Select the N least busy CPU cores based on real-time perf measurements
+ * Returns the number of cores selected (writes core IDs to selected_cores array)
+ */
+static int
+qos_select_least_busy_cores(int *selected_cores, int requested_cores, int total_cores)
+{
+    long *cpu_cycles;
+    int *sorted_indices;
+    int i, j, temp_idx;
+    int valid_count = 0;
+    
+    if (requested_cores <= 0 || total_cores <= 0)
+        return 0;
+    
+    if (requested_cores > total_cores)
+        requested_cores = total_cores;
+    
+    cpu_cycles = (long *) palloc(sizeof(long) * total_cores);
+    sorted_indices = (int *) palloc(sizeof(int) * total_cores);
+    
+    /* Measure cycles for each CPU */
+    for (i = 0; i < total_cores; i++)
+    {
+        cpu_cycles[i] = qos_measure_cpu_cycles(i);
+        sorted_indices[i] = i;
+        
+        if (cpu_cycles[i] >= 0)
+            valid_count++;
+    }
+    
+    /* If perf measurements failed, fallback to simple round-robin */
+    if (valid_count == 0)
+    {
+        int start_core;
+        
+        /* Use shared memory counter for true round-robin across all backends */
+        if (qos_shared_state)
+        {
+            LWLockAcquire(qos_shared_state->lock, LW_EXCLUSIVE);
+            start_core = qos_shared_state->next_cpu_core;
+            qos_shared_state->next_cpu_core = (start_core + requested_cores) % total_cores;
+            LWLockRelease(qos_shared_state->lock);
+            
+            elog(DEBUG1, "qos: perf unavailable, using round-robin - assigned cores starting at %d (pid=%d)",
+                 start_core, (int)getpid());
+        }
+        else
+        {
+            /* Fallback if shared state not available */
+            start_core = 0;
+            elog(DEBUG1, "qos: no shared state, defaulting to core 0");
+        }
+        
+        for (i = 0; i < requested_cores; i++)
+        {
+            selected_cores[i] = (start_core + i) % total_cores;
+        }
+        
+        pfree(cpu_cycles);
+        pfree(sorted_indices);
+        return requested_cores;
+    }
+    
+    /* Sort CPUs by cycle count (ascending = less busy first) */
+    for (i = 0; i < requested_cores; i++)
+    {
+        int min_idx = i;
+        for (j = i + 1; j < total_cores; j++)
+        {
+            /* Skip CPUs where measurement failed */
+            if (cpu_cycles[sorted_indices[j]] < 0)
+                continue;
+            if (cpu_cycles[sorted_indices[min_idx]] < 0 || 
+                cpu_cycles[sorted_indices[j]] < cpu_cycles[sorted_indices[min_idx]])
+            {
+                min_idx = j;
+            }
+        }
+        if (min_idx != i)
+        {
+            temp_idx = sorted_indices[i];
+            sorted_indices[i] = sorted_indices[min_idx];
+            sorted_indices[min_idx] = temp_idx;
+        }
+    }
+    
+    /* Select the least busy N cores */
+    for (i = 0; i < requested_cores; i++)
+    {
+        selected_cores[i] = sorted_indices[i];
+    }
+    
+    elog(DEBUG1, "qos: selected %d cores using perf measurements (pid=%d)", 
+         requested_cores, (int)getpid());
+    
+    pfree(cpu_cycles);
+    pfree(sorted_indices);
+    
+    return requested_cores;
+}
+
+/*
+ * Get or assign CPU cores for this db+role combination
+ * Returns the number of cores assigned (writes core IDs to assigned_cores array)
+ * 
+ * If entry exists: Returns existing assigned cores
+ * If entry doesn't exist: Selects new cores and stores them
+ * 
+ * Thread-safe: Uses LWLock to protect shared affinity_entries array
+ */
+static int
+qos_get_or_assign_cores(Oid database_oid, Oid role_oid, int requested_cores, 
+                        int total_cores, int *assigned_cores)
+{
+    int i, j;
+    int empty_slot = -1;
+    int num_cores = 0;
+    
+    if (!qos_shared_state || requested_cores <= 0)
+        return 0;
+    
+    LWLockAcquire(qos_shared_state->lock, LW_EXCLUSIVE);
+    
+    /* Search for existing entry */
+    for (i = 0; i < MAX_AFFINITY_ENTRIES; i++)
+    {
+        if (qos_shared_state->affinity_entries[i].database_oid == database_oid &&
+            qos_shared_state->affinity_entries[i].role_oid == role_oid)
+        {
+            /* Found existing entry - return assigned cores */
+            num_cores = qos_shared_state->affinity_entries[i].num_cores;
+            for (j = 0; j < num_cores && j < requested_cores; j++)
+            {
+                assigned_cores[j] = qos_shared_state->affinity_entries[i].assigned_cores[j];
+            }
+            LWLockRelease(qos_shared_state->lock);
+            elog(DEBUG2, "qos: reusing existing core assignment for db=%u role=%u: %d cores (pid=%d)",
+                 database_oid, role_oid, num_cores, (int)getpid());
+            return num_cores;
+        }
+        
+        /* Track first empty slot for insertion */
+        if (empty_slot == -1 && 
+            qos_shared_state->affinity_entries[i].database_oid == InvalidOid)
+        {
+            empty_slot = i;
+        }
+    }
+    
+    /* Not found - need to select new cores */
+    LWLockRelease(qos_shared_state->lock);
+    
+    /* Select cores (this may take time with perf measurements) */
+    num_cores = qos_select_least_busy_cores(assigned_cores, requested_cores, total_cores);
+    
+    if (num_cores <= 0)
+        return 0;
+    
+    /* Store the assignment in shared memory */
+    LWLockAcquire(qos_shared_state->lock, LW_EXCLUSIVE);
+    
+    /* Re-check if another backend added this entry while we were selecting cores */
+    for (i = 0; i < MAX_AFFINITY_ENTRIES; i++)
+    {
+        if (qos_shared_state->affinity_entries[i].database_oid == database_oid &&
+            qos_shared_state->affinity_entries[i].role_oid == role_oid)
+        {
+            /* Another backend already added it - use their assignment */
+            num_cores = qos_shared_state->affinity_entries[i].num_cores;
+            for (j = 0; j < num_cores && j < requested_cores; j++)
+            {
+                assigned_cores[j] = qos_shared_state->affinity_entries[i].assigned_cores[j];
+            }
+            LWLockRelease(qos_shared_state->lock);
+            elog(DEBUG1, "qos: another backend assigned cores for db=%u role=%u, using theirs (pid=%d)",
+                 database_oid, role_oid, (int)getpid());
+            return num_cores;
+        }
+    }
+    
+    /* Add new entry if space available */
+    if (empty_slot != -1)
+    {
+        qos_shared_state->affinity_entries[empty_slot].database_oid = database_oid;
+        qos_shared_state->affinity_entries[empty_slot].role_oid = role_oid;
+        qos_shared_state->affinity_entries[empty_slot].num_cores = num_cores;
+        for (j = 0; j < num_cores && j < MAX_CORES_PER_ENTRY; j++)
+        {
+            qos_shared_state->affinity_entries[empty_slot].assigned_cores[j] = assigned_cores[j];
+        }
+        LWLockRelease(qos_shared_state->lock);
+        elog(LOG, "qos: new core assignment for db=%u role=%u: %d cores (pid=%d)",
+             database_oid, role_oid, num_cores, (int)getpid());
+        return num_cores;
+    }
+    
+    /* Array full - use LRU eviction (evict first entry, shift left) */
+    for (i = 0; i < MAX_AFFINITY_ENTRIES - 1; i++)
+    {
+        qos_shared_state->affinity_entries[i] = qos_shared_state->affinity_entries[i + 1];
+    }
+    /* Add new entry at end */
+    qos_shared_state->affinity_entries[MAX_AFFINITY_ENTRIES - 1].database_oid = database_oid;
+    qos_shared_state->affinity_entries[MAX_AFFINITY_ENTRIES - 1].role_oid = role_oid;
+    qos_shared_state->affinity_entries[MAX_AFFINITY_ENTRIES - 1].num_cores = num_cores;
+    for (j = 0; j < num_cores && j < MAX_CORES_PER_ENTRY; j++)
+    {
+        qos_shared_state->affinity_entries[MAX_AFFINITY_ENTRIES - 1].assigned_cores[j] = assigned_cores[j];
+    }
+    
+    LWLockRelease(qos_shared_state->lock);
+    elog(DEBUG1, "qos: new core assignment (evicted LRU) for db=%u role=%u: %d cores (pid=%d)",
+         database_oid, role_oid, num_cores, (int)getpid());
+    return num_cores;
+}
+#endif
+
 /*
  * Check and enforce CPU resource limits for current session
  * 
  * CPU Affinity (Linux only): Restricts total CPU usage to specific cores
+ * Dynamically selects least-busy cores using perf_event_open measurements
+ * Re-evaluated each time to ensure fair distribution across all cores
  * Note: Parallel worker limiting is handled by planner_hook in hooks.c
  */
 void
@@ -145,38 +419,66 @@ qos_enforce_cpu_limit(void)
     
     /* 
      * CPU Affinity - Total CPU usage restriction (Linux only)
-     * Binds the entire backend process to specific CPU cores
+     * Gets or assigns cores for this db+role combination
+     * Each backend for the same db+role will use the same cores
      */
-    if (!cpu_affinity_set)
-    {
 #ifdef __linux__
+    {
         cpu_set_t cpuset;
+        long total_cpus;
+        int requested_cores;
+        int *assigned_cores;
+        int num_assigned;
         int i;
         
-        CPU_ZERO(&cpuset);
-        /* Set affinity to first N cores */
-        for (i = 0; i < limits.cpu_core_limit && i < CPU_SETSIZE; i++)
+        /* Get total available CPUs */
+        total_cpus = sysconf(_SC_NPROCESSORS_ONLN);
+        if (total_cpus <= 0)
+            total_cpus = 1;
+        
+        /* Clamp requested cores to available CPUs */
+        requested_cores = limits.cpu_core_limit;
+        if (requested_cores > total_cpus)
         {
-            CPU_SET(i, &cpuset);
+            elog(DEBUG2, "qos: cpu_core_limit=%d exceeds available CPUs=%ld, clamping to %ld",
+                 requested_cores, total_cpus, total_cpus);
+            requested_cores = (int) total_cpus;
         }
         
-        if (sched_setaffinity(0, sizeof(cpu_set_t), &cpuset) == 0)
+        assigned_cores = (int *) palloc(sizeof(int) * requested_cores);
+        
+        /* Get or assign cores for this db+role combination */
+        num_assigned = qos_get_or_assign_cores(MyDatabaseId, GetUserId(), 
+                                                requested_cores, (int) total_cpus, 
+                                                assigned_cores);
+        
+        if (num_assigned > 0)
         {
-            cpu_affinity_set = true;
-            elog(DEBUG1, "qos: CPU affinity set - limited to %d cores for user %u",
-                 limits.cpu_core_limit, GetUserId());
+            CPU_ZERO(&cpuset);
+            for (i = 0; i < num_assigned; i++)
+            {
+                CPU_SET(assigned_cores[i], &cpuset);
+            }
+            
+            if (sched_setaffinity(0, sizeof(cpu_set_t), &cpuset) == 0)
+            {
+                elog(DEBUG1, "qos: CPU affinity set for db=%u role=%u pid=%d - using %d core(s): core %d%s",
+                     MyDatabaseId, GetUserId(), (int)getpid(), num_assigned,
+                     assigned_cores[0], num_assigned > 1 ? " (+ others)" : "");
+            }
+            else
+            {
+                elog(WARNING, "qos: failed to set CPU affinity for db=%u role=%u pid=%d: %m",
+                     MyDatabaseId, GetUserId(), (int)getpid());
+            }
         }
-        else
-        {
-            elog(WARNING, "qos: failed to set CPU affinity for user %u: %m",
-                 GetUserId());
-        }
-#else
-        /* On non-Linux platforms, only parallel worker limiting is available (via planner hook) */
-        elog(DEBUG2, "qos: CPU affinity not supported on this platform, parallel workers limited via planner");
-        cpu_affinity_set = true; /* Mark as done to avoid repeated warnings */
-#endif
+        
+        pfree(assigned_cores);
     }
+#else
+    /* On non-Linux platforms, only parallel worker limiting is available (via planner hook) */
+    elog(DEBUG2, "qos: CPU affinity not supported on this platform, parallel workers limited via planner");
+#endif
 }
 
 /*
