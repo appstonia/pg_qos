@@ -116,10 +116,21 @@ qos_shmem_startup(void)
     
     if (!found)
     {
+        int i;
+        
         /* Initialize shared state */
         memset(qos_shared_state, 0, sizeof(QoSSharedState));
         qos_shared_state->lock = &(GetNamedLWLockTranche("qos")->lock);
         qos_shared_state->settings_epoch = 0;
+        qos_shared_state->next_cpu_core = 0;
+        
+        /* Initialize affinity tracking array */
+        for (i = 0; i < MAX_AFFINITY_ENTRIES; i++)
+        {
+            qos_shared_state->affinity_entries[i].database_oid = InvalidOid;
+            qos_shared_state->affinity_entries[i].role_oid = InvalidOid;
+            qos_shared_state->affinity_entries[i].num_cores = 0;
+        }
     }
     
     LWLockRelease(AddinShmemInitLock);

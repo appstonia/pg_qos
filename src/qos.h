@@ -52,6 +52,18 @@ typedef struct QoSStats
     uint64  concurrent_insert_violations;
 } QoSStats;
 
+/* CPU Affinity Tracking Entry */
+#define MAX_CORES_PER_ENTRY 64
+typedef struct QoSAffinityEntry
+{
+    Oid     database_oid;
+    Oid     role_oid;
+    int     num_cores;                      /* Number of cores assigned */
+    int     assigned_cores[MAX_CORES_PER_ENTRY]; /* Array of assigned core IDs */
+} QoSAffinityEntry;
+
+#define MAX_AFFINITY_ENTRIES 128
+
 /* Shared State */
 typedef struct QoSSharedState
 {
@@ -63,6 +75,8 @@ typedef struct QoSSharedState
     int         active_inserts;     /* Number of active INSERT statements */
     QoSStats    stats;
     int         settings_epoch;     /* Bumped on ALTER ROLE/DB SET qos.* to notify sessions */
+    int         next_cpu_core;      /* Round-robin counter for CPU core assignment (protected by lock) */
+    QoSAffinityEntry affinity_entries[MAX_AFFINITY_ENTRIES]; /* Track which db+role combinations have affinity set */
 } QoSSharedState;
 
 /* Global variables */
