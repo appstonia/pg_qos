@@ -101,7 +101,7 @@ Effective limits are the most restrictive combination of role-level and database
   - Intercepts `SET work_mem` and rejects values above `qos.work_mem_limit`.
 
 - CPU limiting
-  - On Linux, QoS binds the backend to the first N CPU cores (CPU affinity) to cap total CPU usage per session.
+  - On Linux, QoS binds the backend to the first N CPU cores (CPU affinity) to cap total CPU usage.
   - The planner hook ensures `Gather`/`Gather Merge` parallel workers do not exceed the allowed cores so parallelism respects the cap.
   - On non-Linux platforms, only the planner effect applies.
 
