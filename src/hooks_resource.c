@@ -369,7 +369,7 @@ qos_get_or_assign_cores(Oid database_oid, Oid role_oid, int requested_cores,
             qos_shared_state->affinity_entries[empty_slot].assigned_cores[j] = assigned_cores[j];
         }
         LWLockRelease(qos_shared_state->lock);
-        elog(LOG, "qos: new core assignment for db=%u role=%u: %d cores (pid=%d)",
+        elog(DEBUG1, "qos: new core assignment for db=%u role=%u: %d cores (pid=%d)",
              database_oid, role_oid, num_cores, (int)getpid());
         return num_cores;
     }
@@ -440,7 +440,7 @@ qos_enforce_cpu_limit(void)
         requested_cores = limits.cpu_core_limit;
         if (requested_cores > total_cpus)
         {
-            elog(DEBUG2, "qos: cpu_core_limit=%d exceeds available CPUs=%ld, clamping to %ld",
+            elog(WARNING, "qos: cpu_core_limit=%d exceeds available CPUs=%ld, clamping to %ld",
                  requested_cores, total_cpus, total_cpus);
             requested_cores = (int) total_cpus;
         }
@@ -477,7 +477,7 @@ qos_enforce_cpu_limit(void)
     }
 #else
     /* On non-Linux platforms, only parallel worker limiting is available (via planner hook) */
-    elog(DEBUG2, "qos: CPU affinity not supported on this platform, parallel workers limited via planner");
+    elog(DEBUG5, "qos: CPU affinity not supported on this platform, parallel workers limited via planner");
 #endif
 }
 
