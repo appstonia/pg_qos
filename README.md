@@ -14,7 +14,7 @@ PostgreSQL extension that provides Quality of Service (QoS) style resource gover
 
 - PostgreSQL 15 or newer (officially supported)
 - Build toolchain and server headers (`pg_config` must be available)
-- Linux (optional) for CPU affinity; on other platforms, only parallel worker limiting is applied
+- Linux for CPU affinity; on other platforms, only parallel worker limiting is applied
 
 Debian/Ubuntu packages:
 
