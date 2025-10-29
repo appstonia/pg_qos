@@ -462,7 +462,7 @@ qos_enforce_cpu_limit(void)
             
             if (sched_setaffinity(0, sizeof(cpu_set_t), &cpuset) == 0)
             {
-                elog(DEBUG1, "qos: CPU affinity set for db=%u role=%u pid=%d - using %d core(s): core %d%s",
+                elog(DEBUG3, "qos: CPU affinity set for db=%u role=%u pid=%d - using %d core(s): core %d%s",
                      MyDatabaseId, GetUserId(), (int)getpid(), num_assigned,
                      assigned_cores[0], num_assigned > 1 ? " (+ others)" : "");
             }
