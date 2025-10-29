@@ -148,4 +148,4 @@ Remove from `shared_preload_libraries` and restart the server.
 
 ## License
 
-See the `LICENSE` file in this repository.
+See the [LICENSE](LICENSE) file in this repository.
