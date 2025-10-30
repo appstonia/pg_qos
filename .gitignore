@@ -6,3 +6,4 @@
 *.pyc
 .DS_Store
 build.sh
+.vscode/
