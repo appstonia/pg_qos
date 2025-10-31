@@ -50,9 +50,9 @@ Notes for Debian/Ubuntu:
 - If you have multiple PostgreSQL versions installed, you can point the build to a specific one by exporting PG_CONFIG:
 
 ```bash
-export PG_CONFIG=/usr/lib/postgresql/16/bin/pg_config
-make clean && make
-sudo make install
+make clean
+make PG_CONFIG=/usr/lib/postgresql/<version>/bin/pg_config
+sudo make install PG_CONFIG=/usr/lib/postgresql/<version>/bin/pg_config
 ```
 
 1. Enable the extension (server restart required due to hooks and shared memory)
