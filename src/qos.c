@@ -47,8 +47,8 @@ QoSSharedState *qos_shared_state = NULL;
 bool qos_enabled = true;
 
 /* Hook save variables */
-shmem_startup_hook_type prev_shmem_startup_hook = NULL;
-shmem_request_hook_type prev_shmem_request_hook = NULL;
+static shmem_startup_hook_type prev_shmem_startup_hook = NULL;
+static shmem_request_hook_type prev_shmem_request_hook = NULL;
 
 /* Forward declarations */
 static void qos_shmem_request(void);
