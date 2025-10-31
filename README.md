@@ -4,7 +4,7 @@ PostgreSQL extension that provides Quality of Service (QoS) style resource gover
 
 - Enforce per-role and per-database limits via `ALTER ROLE/DATABASE SET qos.*`
 - Limit work_mem per session
-- Limit CPU usage by binding the backend to N CPU cores (CPU affinity, Linux only); planner integration ensures parallel workers stay within that cap
+- Limit CPU usage by binding the backend to N CPU cores (Linux only); planner integration ensures parallel workers stay within that cap
 - Track and cap concurrent transactions and statements (SELECT/UPDATE/DELETE/INSERT)
 - Fast, reliable cache invalidation across sessions (no reconnect) using a shared epoch mechanism
 
@@ -12,7 +12,7 @@ PostgreSQL extension that provides Quality of Service (QoS) style resource gover
 
 - PostgreSQL 15 or newer (officially supported)
 - Build toolchain and server headers (`pg_config` must be available)
-- Linux for CPU affinity; on other platforms, only parallel worker limiting is applied
+- Linux for CPU limiting; on other platforms, only parallel worker limiting is applied
 
 Debian/Ubuntu packages:
 
@@ -101,7 +101,7 @@ Effective limits are the most restrictive combination of role-level and database
   - Intercepts `SET work_mem` and rejects values above `qos.work_mem_limit`.
 
 - CPU limiting
-  - On Linux, QoS binds the backend to the first N CPU cores (CPU affinity) to cap total CPU usage.
+  - On Linux, QoS binds the backend to the N CPU cores (CPU affinity) to cap total CPU usage.
   - The planner hook ensures `Gather`/`Gather Merge` parallel workers do not exceed the allowed cores so parallelism respects the cap.
   - On non-Linux platforms, only the planner effect applies.
 
@@ -121,7 +121,7 @@ You’ll see messages when cache is refreshed, CPU workers are adjusted, or limi
 
 ## Limitations
 
-- CPU affinity is only available on Linux; other platforms only enforce parallel worker limits via the planner.
+- CPU limiting is only available on Linux; other platforms only enforce parallel worker limits via the planner.
 - Requires `shared_preload_libraries` and a server restart to activate.
 - Official support targets PostgreSQL 15 and newer.
 
