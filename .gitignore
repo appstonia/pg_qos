@@ -7,3 +7,6 @@
 .DS_Store
 build.sh
 .vscode/
+debian/
+*.buildinfo
+build*
