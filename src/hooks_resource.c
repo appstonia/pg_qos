@@ -45,6 +45,10 @@ static int qos_get_or_assign_cores(Oid database_oid, Oid role_oid, int requested
                                      int total_cores, int *assigned_cores);
 #endif
 
+/* Per-backend tracking: has work_mem been enforced yet? */
+static bool work_mem_enforced = false;
+static int work_mem_last_epoch = -1;
+
 /*
  * Planner hook wrapper - adjust parallel workers based on CPU limits
  * Called from main hooks.c planner hook
@@ -482,67 +486,120 @@ qos_enforce_cpu_limit(void)
 }
 
 /*
- * Enforce work_mem limit when SET work_mem is executed
+ * Enforce work_mem limit
+ * 
+ * 1. When user executes SET work_mem - validates the new value
+ * 2. When session starts - enforces limit on current work_mem value
  */
 void
 qos_enforce_work_mem_limit(VariableSetStmt *stmt)
 {
     QoSLimits limits;
-    A_Const *arg;
-    char *value_str = NULL;
     int64 new_work_mem_bytes;
+    int current_work_mem_kb;
+    int64 current_work_mem_bytes;
     
     if (!qos_enabled)
-        return;
-    
-    /* Only process work_mem SET commands */
-    if (!stmt || !stmt->name || strcmp(stmt->name, "work_mem") != 0 || stmt->kind != VAR_SET_VALUE)
         return;
     
     /* Get cached limits - no catalog access needed */
     limits = qos_get_cached_limits();
     
     /* Check if limit is enabled */
-    if (limits.work_mem_limit < 0 || stmt->args == NIL)
+    if (limits.work_mem_limit < 0)
         return;
     
-    /* Parse the new value */
-    arg = (A_Const *) linitial(stmt->args);
-    
-    if (IsA(arg, A_Const))
+    /* User is setting work_mem explicitly */
+    if (stmt && stmt->name && strcmp(stmt->name, "work_mem") == 0 && 
+        stmt->kind == VAR_SET_VALUE && stmt->args != NIL)
     {
-        if (nodeTag(&arg->val) == T_Integer)
+        A_Const *arg = (A_Const *) linitial(stmt->args);
+        
+        if (IsA(arg, A_Const))
         {
-            /* Integer value in KB */
-            new_work_mem_bytes = (int64)intVal(&arg->val) * 1024L;
+            if (nodeTag(&arg->val) == T_Integer)
+            {
+                /* Integer value in KB */
+                new_work_mem_bytes = (int64)intVal(&arg->val) * 1024L;
+            }
+            else if (nodeTag(&arg->val) == T_String)
+            {
+                /* String value like "128MB" - use shared parser */
+                char *value_str = strVal(&arg->val);
+                new_work_mem_bytes = qos_parse_memory_unit(value_str);
+            }
+            else
+            {
+                return; /* Unknown value type */
+            }
+            
+            /* Check if new value exceeds limit */
+            if (new_work_mem_bytes > limits.work_mem_limit)
+            {
+                if (qos_shared_state)
+                {
+                    LWLockAcquire(qos_shared_state->lock, LW_EXCLUSIVE);
+                    qos_shared_state->stats.work_mem_violations++;
+                    LWLockRelease(qos_shared_state->lock);
+                }
+                
+                ereport(ERROR,
+                        (errcode(ERRCODE_INSUFFICIENT_RESOURCES),
+                         errmsg("qos: work_mem limit exceeded"),
+                         errdetail("Requested %ld KB, maximum allowed is %ld KB",
+                                  new_work_mem_bytes / 1024, limits.work_mem_limit / 1024),
+                         errhint("Contact administrator to increase qos.work_mem_limit")));
+            }
         }
-        else if (nodeTag(&arg->val) == T_String)
+    }
+    /* Check and enforce limit on current work_mem value (called at session start) */
+    else if (stmt == NULL)
+    {
+        int current_epoch;
+        
+        /* Check if epoch changed - if so, re-enforce work_mem */
+        if (qos_shared_state)
         {
-            /* String value like "128MB" - use shared parser */
-            value_str = strVal(&arg->val);
-            new_work_mem_bytes = qos_parse_memory_unit(value_str);
-        }
-        else
-        {
-            return; /* Unknown value type */
+            current_epoch = qos_shared_state->settings_epoch;
+            if (current_epoch != work_mem_last_epoch)
+            {
+                work_mem_enforced = false;
+                work_mem_last_epoch = current_epoch;
+                elog(DEBUG1, "qos: epoch changed %d -> %d, will re-enforce work_mem", 
+                     work_mem_last_epoch == -1 ? -1 : work_mem_last_epoch, current_epoch);
+            }
         }
         
-        /* Check limit */
-        if (new_work_mem_bytes > limits.work_mem_limit)
+        /* Only enforce once per backend per epoch to avoid repeated reductions */
+        if (work_mem_enforced)
         {
+            elog(DEBUG3, "qos: work_mem already enforced in this epoch, skipping");
+            return;
+        }
+        
+        work_mem_enforced = true;
+        
+        /* Get current work_mem setting (in KB) */
+        current_work_mem_kb = work_mem;
+        current_work_mem_bytes = (int64)current_work_mem_kb * 1024L;
+        
+        /* If current work_mem exceeds limit, cap it */
+        if (current_work_mem_bytes > limits.work_mem_limit)
+        {
+            int new_work_mem_kb = (int)(limits.work_mem_limit / 1024L);
+            
+            /* Directly modify the global work_mem variable */
+            work_mem = new_work_mem_kb;
+            
+            elog(LOG, "qos: work_mem enforced at %d KB (was %d KB) for db=%u role=%u",
+                 new_work_mem_kb, current_work_mem_kb, MyDatabaseId, GetUserId());
+            
             if (qos_shared_state)
             {
                 LWLockAcquire(qos_shared_state->lock, LW_EXCLUSIVE);
                 qos_shared_state->stats.work_mem_violations++;
                 LWLockRelease(qos_shared_state->lock);
             }
-            
-            ereport(ERROR,
-                    (errcode(ERRCODE_INSUFFICIENT_RESOURCES),
-                     errmsg("qos: work_mem limit exceeded"),
-                     errdetail("Requested %ld KB, maximum allowed is %ld KB",
-                              new_work_mem_bytes / 1024, limits.work_mem_limit / 1024),
-                     errhint("Contact administrator to increase qos.work_mem_limit")));
         }
     }
 }

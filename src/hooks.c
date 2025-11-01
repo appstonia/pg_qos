@@ -40,6 +40,13 @@ static planner_hook_type prev_planner_hook = NULL;
 static PlannedStmt *
 qos_planner(Query *parse, const char *query_string, int cursorOptions, ParamListInfo boundParams)
 {
+    /* Enforce work_mem limit BEFORE query planning starts */
+    if (qos_enabled)
+    {
+        elog(DEBUG3, "qos: planner_hook called, enforcing work_mem");
+        qos_enforce_work_mem_limit(NULL);
+    }
+    
     /* Delegate to hooks_resource.c for parallel worker adjustment */
     return qos_planner_hook(parse, query_string, cursorOptions, boundParams, prev_planner_hook);
 }
@@ -60,6 +67,13 @@ qos_ProcessUtility(PlannedStmt *pstmt,
     Node *parsetree = pstmt->utilityStmt;
     bool bump_epoch_after = false;
     VariableSetStmt *qos_set = NULL;
+    
+    /* Enforce work_mem limit on first command in session - delegates to hooks_resource.c */
+    if (qos_enabled)
+    {
+        elog(DEBUG2, "qos: ProcessUtility hook called, enforcing work_mem");
+        qos_enforce_work_mem_limit(NULL);
+    }
     
     /* Check if setting work_mem - delegates to hooks_resource.c */
     if (qos_enabled && IsA(parsetree, VariableSetStmt))
