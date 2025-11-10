@@ -149,7 +149,7 @@ Remove from `shared_preload_libraries` and restart the server.
 
 PostgreSQL extension that provides Quality of Service (QoS) style resource governance for sessions and queries.
 
-Copyright (C) 2025  Atıf Ceylan
+Copyright (C) 2025  AppstoniA
 
 This program is free software: you can redistribute it and/or modify
 it under the terms of the GNU General Public License as published by
