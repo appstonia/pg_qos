@@ -27,12 +27,16 @@
 #include "executor/executor.h"
 #include "nodes/parsenodes.h"
 #include "optimizer/planner.h"
+#include "commands/defrem.h"
 
 /* Hook save variables */
 static ProcessUtility_hook_type prev_ProcessUtility = NULL;
 static ExecutorStart_hook_type prev_ExecutorStart = NULL;
 static ExecutorEnd_hook_type prev_ExecutorEnd = NULL;
 static planner_hook_type prev_planner_hook = NULL;
+
+/* Flag to suppress concurrency tracking in planner (for EXPLAIN/PREPARE) */
+static bool suppress_concurrency_tracking = false;
 
 /*
  * Planner hook - delegates to hooks_resource.c for CPU limit enforcement
@@ -45,6 +49,26 @@ qos_planner(Query *parse, const char *query_string, int cursorOptions, ParamList
     {
         elog(DEBUG3, "qos: planner_hook called, enforcing work_mem");
         qos_enforce_work_mem_limit(NULL);
+    }
+    
+    /* 
+     * Track concurrency limits BEFORE planning to avoid overhead of rejected queries.
+     * We skip this for EXPLAIN (no analyze) and PREPARE to avoid leaking counts.
+     * EXECUTE statements will be caught by ExecutorStart hook.
+     */
+    if (qos_enabled && !suppress_concurrency_tracking)
+    {
+        /* Track transaction */
+        qos_track_transaction_start();
+        
+        /* Track statement */
+        if (parse->commandType == CMD_SELECT || 
+            parse->commandType == CMD_UPDATE || 
+            parse->commandType == CMD_DELETE || 
+            parse->commandType == CMD_INSERT)
+        {
+            qos_track_statement_start(parse->commandType);
+        }
     }
     
     /* Delegate to hooks_resource.c for parallel worker adjustment */
@@ -101,6 +125,35 @@ qos_ProcessUtility(PlannedStmt *pstmt,
         {
             bump_epoch_after = true;
         }
+        
+        /* 
+         * Suppress concurrency tracking in planner for EXPLAIN (without ANALYZE) 
+         * and PREPARE statements to prevent counter leaks.
+         */
+        if (IsA(parsetree, ExplainStmt))
+        {
+            ExplainStmt *estmt = (ExplainStmt *) parsetree;
+            bool is_analyze = false;
+            ListCell *lc;
+            
+            foreach(lc, estmt->options)
+            {
+                DefElem *opt = (DefElem *) lfirst(lc);
+                if (strcmp(opt->defname, "analyze") == 0)
+                {
+                    is_analyze = true;
+                    if (opt->arg != NULL)
+                        is_analyze = defGetBoolean(opt);
+                }
+            }
+            
+            if (!is_analyze)
+                suppress_concurrency_tracking = true;
+        }
+        else if (IsA(parsetree, PrepareStmt))
+        {
+            suppress_concurrency_tracking = true;
+        }
     }
     
     /* Call previous hook or standard utility */
@@ -110,6 +163,9 @@ qos_ProcessUtility(PlannedStmt *pstmt,
     else
         standard_ProcessUtility(pstmt, queryString, readOnlyTree, context,
                               params, queryEnv, dest, qc);
+
+    /* Reset suppression flag */
+    suppress_concurrency_tracking = false;
 
     /* If relevant QoS setting changed successfully, bump epoch so others reload */
     if (bump_epoch_after)
@@ -124,6 +180,16 @@ qos_ExecutorStart(QueryDesc *queryDesc, int eflags)
 {
     /* Enforce CPU resource limits - delegates to hooks_resource.c */
     qos_enforce_cpu_limit();
+    
+    /* 
+     * Note: Concurrency tracking is now primarily handled in qos_planner 
+     * to reject queries before planning overhead.
+     * 
+     * However, we still call these here to handle cases where planner hook 
+     * wasn't called or tracking was suppressed (e.g. EXECUTE of prepared stmt).
+     * The tracking functions have internal flags (statement_tracked/transaction_tracked)
+     * to ensure we don't double-count.
+     */
     
     /* Track transaction if not already tracked - delegates to hooks_transaction.c */
     qos_track_transaction_start();
