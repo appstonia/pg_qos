@@ -28,6 +28,7 @@
 #include "nodes/parsenodes.h"
 #include "optimizer/planner.h"
 #include "commands/defrem.h"
+#include "access/xact.h"
 
 /* Hook save variables */
 static ProcessUtility_hook_type prev_ProcessUtility = NULL;
@@ -37,6 +38,25 @@ static planner_hook_type prev_planner_hook = NULL;
 
 /* Flag to suppress concurrency tracking in planner (for EXPLAIN/PREPARE) */
 static bool suppress_concurrency_tracking = false;
+
+/*
+ * Transaction callback to handle cleanup on abort/error
+ */
+static void
+qos_xact_callback(XactEvent event, void *arg)
+{
+    /* 
+     * If transaction aborts (error, cancel, disconnect), 
+     * ensure we decrement counters if they were tracked.
+     * ExecutorEnd is not called on error, so we need this safety net.
+     */
+    if (event == XACT_EVENT_ABORT || event == XACT_EVENT_PARALLEL_ABORT)
+    {
+        elog(DEBUG3, "qos: transaction callback called on abort, cleaning up concurrency tracking");
+        qos_track_statement_end();
+        qos_track_transaction_end();
+    }
+}
 
 /*
  * Planner hook - delegates to hooks_resource.c for CPU limit enforcement
@@ -249,6 +269,9 @@ qos_register_hooks(void)
     
     /* Initialize cache system with syscache invalidation callbacks */
     qos_init_cache();
+    
+    /* Register transaction callback for cleanup on abort */
+    RegisterXactCallback(qos_xact_callback, NULL);
     
     elog(DEBUG1, "qos: hooks registered and cache initialized");
 }
