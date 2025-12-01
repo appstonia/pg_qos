@@ -17,6 +17,9 @@
 #include "qos.h"
 #include "hooks_internal.h"
 #include "storage/lwlock.h"
+#include "miscadmin.h"
+#include "storage/proc.h"
+#include "storage/backendid.h"
 
 /* Per-backend transaction tracking */
 static bool transaction_tracked = false;
@@ -28,6 +31,8 @@ void
 qos_track_transaction_start(void)
 {
     QoSLimits limits;
+    int count = 0;
+    int i;
     
     if (!qos_enabled || transaction_tracked)
         return;
@@ -39,22 +44,44 @@ qos_track_transaction_start(void)
     {
         LWLockAcquire(qos_shared_state->lock, LW_EXCLUSIVE);
         
-        if (qos_shared_state->active_transactions >= limits.max_concurrent_tx)
+        /* Scan active backends to count current usage */
+        for (i = 0; i < qos_shared_state->max_backends; i++)
+        {
+            /* Skip empty slots */
+            if (qos_shared_state->backend_status[i].pid == 0)
+                continue;
+                
+            /* Skip myself */
+            if (i == MyBackendId - 1)
+                continue;
+            
+            /* Count if matches my role, db, and is in transaction */
+            if (qos_shared_state->backend_status[i].role_oid == GetUserId() &&
+                qos_shared_state->backend_status[i].database_oid == MyDatabaseId &&
+                qos_shared_state->backend_status[i].in_transaction)
+            {
+                count++;
+            }
+        }
+        
+        if (count >= limits.max_concurrent_tx)
         {
             qos_shared_state->stats.concurrent_tx_violations++;
             qos_shared_state->stats.rejected_queries++;
             LWLockRelease(qos_shared_state->lock);
             
             ereport(ERROR,
-                    (errcode(ERRCODE_TOO_MANY_CONNECTIONS),
+                    (errcode(ERRCODE_PROGRAM_LIMIT_EXCEEDED),
                      errmsg("qos: maximum concurrent transactions exceeded"),
-                     errdetail("Current: %d, Maximum: %d",
-                              qos_shared_state->active_transactions, limits.max_concurrent_tx),
+                     errdetail("Current: %d, Maximum: %d", count, limits.max_concurrent_tx),
                      errhint("Wait for other transactions to complete")));
         }
         
-        qos_shared_state->active_transactions++;
-        qos_shared_state->stats.total_queries++;
+        /* Register myself */
+        qos_shared_state->backend_status[MyBackendId - 1].pid = MyProcPid;
+        qos_shared_state->backend_status[MyBackendId - 1].role_oid = GetUserId();
+        qos_shared_state->backend_status[MyBackendId - 1].database_oid = MyDatabaseId;
+        qos_shared_state->backend_status[MyBackendId - 1].in_transaction = true;
         
         LWLockRelease(qos_shared_state->lock);
         
@@ -76,8 +103,9 @@ qos_track_transaction_end(void)
     {
         LWLockAcquire(qos_shared_state->lock, LW_EXCLUSIVE);
         
-        if (qos_shared_state->active_transactions > 0)
-            qos_shared_state->active_transactions--;
+        /* Clear my transaction flag */
+        if (qos_shared_state->backend_status[MyBackendId - 1].pid == MyProcPid)
+            qos_shared_state->backend_status[MyBackendId - 1].in_transaction = false;
         
         LWLockRelease(qos_shared_state->lock);
     }

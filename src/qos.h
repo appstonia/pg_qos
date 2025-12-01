@@ -22,6 +22,7 @@
 #include "fmgr.h"
 #include "storage/lwlock.h"
 #include "storage/shmem.h"
+#include "nodes/nodes.h"
 
 /* QoS Limits Structure */
 typedef struct QoSLimits
@@ -64,19 +65,32 @@ typedef struct QoSAffinityEntry
 
 #define MAX_AFFINITY_ENTRIES 128
 
+/* Backend Status Entry for Concurrency Tracking */
+typedef struct QoSBackendStatus
+{
+    pid_t   pid;            /* Process ID (0 if slot unused) */
+    Oid     role_oid;       /* User OID */
+    Oid     database_oid;   /* Database OID */
+    CmdType cmd_type;       /* Current command type (CMD_UNKNOWN if none) */
+    bool    in_transaction; /* Is in transaction? */
+} QoSBackendStatus;
+
 /* Shared State */
 typedef struct QoSSharedState
 {
     LWLock     *lock;
-    int         active_transactions;
-    int         active_selects;     /* Number of active SELECT statements */
-    int         active_updates;     /* Number of active UPDATE statements */
-    int         active_deletes;     /* Number of active DELETE statements */
-    int         active_inserts;     /* Number of active INSERT statements */
     QoSStats    stats;
     int         settings_epoch;     /* Bumped on ALTER ROLE/DB SET qos.* to notify sessions */
     int         next_cpu_core;      /* Round-robin counter for CPU core assignment (protected by lock) */
+    int         max_backends;       /* MaxBackends value at startup */
     QoSAffinityEntry affinity_entries[MAX_AFFINITY_ENTRIES]; /* Track which db+role combinations have affinity set */
+    
+    /* 
+     * Per-backend status array for robust concurrency tracking.
+     * Indexed by BackendId (0-based).
+     * Must be last member for flexible array sizing.
+     */
+    QoSBackendStatus backend_status[FLEXIBLE_ARRAY_MEMBER];
 } QoSSharedState;
 
 /* Global variables */

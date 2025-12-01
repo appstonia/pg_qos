@@ -90,10 +90,16 @@ qos_reset_stats(PG_FUNCTION_ARGS)
 static void
 qos_shmem_request(void)
 {
+    Size size;
+
     if (prev_shmem_request_hook)
         prev_shmem_request_hook();
 
-    RequestAddinShmemSpace(MAXALIGN(sizeof(QoSSharedState)));
+    /* Calculate size needed for shared state + per-backend status array */
+    size = sizeof(QoSSharedState);
+    size = add_size(size, mul_size(MaxBackends, sizeof(QoSBackendStatus)));
+    
+    RequestAddinShmemSpace(MAXALIGN(size));
     RequestNamedLWLockTranche("qos", 1);
 }
 
@@ -104,14 +110,19 @@ static void
 qos_shmem_startup(void)
 {
     bool found;
+    Size size;
 
     if (prev_shmem_startup_hook)
         prev_shmem_startup_hook();
 
+    /* Calculate size needed for shared state + per-backend status array */
+    size = sizeof(QoSSharedState);
+    size = add_size(size, mul_size(MaxBackends, sizeof(QoSBackendStatus)));
+
     LWLockAcquire(AddinShmemInitLock, LW_EXCLUSIVE);
     
     qos_shared_state = ShmemInitStruct("qos_shared_state",
-                                        sizeof(QoSSharedState),
+                                        size,
                                         &found);
     
     if (!found)
@@ -119,10 +130,11 @@ qos_shmem_startup(void)
         int i;
         
         /* Initialize shared state */
-        memset(qos_shared_state, 0, sizeof(QoSSharedState));
+        memset(qos_shared_state, 0, size);
         qos_shared_state->lock = &(GetNamedLWLockTranche("qos")->lock);
         qos_shared_state->settings_epoch = 0;
         qos_shared_state->next_cpu_core = 0;
+        qos_shared_state->max_backends = MaxBackends;
         
         /* Initialize affinity tracking array */
         for (i = 0; i < MAX_AFFINITY_ENTRIES; i++)
@@ -130,6 +142,16 @@ qos_shmem_startup(void)
             qos_shared_state->affinity_entries[i].database_oid = InvalidOid;
             qos_shared_state->affinity_entries[i].role_oid = InvalidOid;
             qos_shared_state->affinity_entries[i].num_cores = 0;
+        }
+        
+        /* Initialize backend status array */
+        for (i = 0; i < MaxBackends; i++)
+        {
+            qos_shared_state->backend_status[i].pid = 0;
+            qos_shared_state->backend_status[i].role_oid = InvalidOid;
+            qos_shared_state->backend_status[i].database_oid = InvalidOid;
+            qos_shared_state->backend_status[i].cmd_type = CMD_UNKNOWN;
+            qos_shared_state->backend_status[i].in_transaction = false;
         }
     }
     
