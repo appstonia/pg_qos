@@ -36,11 +36,18 @@ extern void qos_track_statement_end(void);
 extern void qos_track_transaction_start(void);
 extern void qos_track_transaction_end(void);
 
+/* For version 17+ */
+#ifndef MyBackendId
+/* Backend slot helper (implemented in hooks.c) */
+extern int qos_get_backend_slot(bool allocate_if_missing);
+extern void qos_reset_backend_slot(void);
+#endif
+
 /* Resource enforcement functions (hooks_resource.c) */
 extern void qos_enforce_cpu_limit(void);
 extern void qos_enforce_work_mem_limit(VariableSetStmt *stmt);
-extern PlannedStmt *qos_planner_hook(Query *parse, const char *query_string, 
-                                      int cursorOptions, ParamListInfo boundParams,
-                                      planner_hook_type prev_hook);
+extern PlannedStmt *qos_planner_hook(Query *parse, const char *query_string,
+									 int cursorOptions, ParamListInfo boundParams,
+									 planner_hook_type prev_hook);
 
 #endif /* QOS_HOOKS_INTERNAL_H */

@@ -19,7 +19,6 @@
 #include "storage/lwlock.h"
 #include "miscadmin.h"
 #include "storage/proc.h"
-#include "storage/backendid.h"
 
 /* Per-backend transaction tracking */
 static bool transaction_tracked = false;
@@ -33,6 +32,9 @@ qos_track_transaction_start(void)
     QoSLimits limits;
     int count = 0;
     int i;
+#ifndef MyBackendId
+    int my_slot = -1;
+#endif
     
     if (!qos_enabled || transaction_tracked)
         return;
@@ -42,6 +44,9 @@ qos_track_transaction_start(void)
     
     if (qos_shared_state && limits.max_concurrent_tx > 0)
     {
+#ifndef MyBackendId
+    my_slot = qos_get_backend_slot(true);
+#endif
         LWLockAcquire(qos_shared_state->lock, LW_EXCLUSIVE);
         
         /* Scan active backends to count current usage */
@@ -52,7 +57,13 @@ qos_track_transaction_start(void)
                 continue;
                 
             /* Skip myself */
-            if (i == MyBackendId - 1)
+                if (
+#ifndef MyBackendId
+                i == my_slot
+#else
+                i == MyBackendId - 1
+#endif
+                )
                 continue;
             
             /* Count if matches my role, db, and is in transaction */
@@ -78,10 +89,19 @@ qos_track_transaction_start(void)
         }
         
         /* Register myself */
+    #ifndef MyBackendId
+        if (my_slot >= 0)
+        {
+            qos_shared_state->backend_status[my_slot].role_oid = GetUserId();
+            qos_shared_state->backend_status[my_slot].database_oid = MyDatabaseId;
+            qos_shared_state->backend_status[my_slot].in_transaction = true;
+        }
+    #else
         qos_shared_state->backend_status[MyBackendId - 1].pid = MyProcPid;
         qos_shared_state->backend_status[MyBackendId - 1].role_oid = GetUserId();
         qos_shared_state->backend_status[MyBackendId - 1].database_oid = MyDatabaseId;
         qos_shared_state->backend_status[MyBackendId - 1].in_transaction = true;
+    #endif
         
         LWLockRelease(qos_shared_state->lock);
         
@@ -96,16 +116,34 @@ qos_track_transaction_start(void)
 void
 qos_track_transaction_end(void)
 {
+#ifndef MyBackendId
+    int my_slot = -1;
+#endif
     if (!qos_enabled || !transaction_tracked)
         return;
     
     if (qos_shared_state)
     {
+#ifndef MyBackendId
+    my_slot = qos_get_backend_slot(false);
+#endif
         LWLockAcquire(qos_shared_state->lock, LW_EXCLUSIVE);
         
         /* Clear my transaction flag */
-        if (qos_shared_state->backend_status[MyBackendId - 1].pid == MyProcPid)
+        if (
+    #ifndef MyBackendId
+            my_slot >= 0 && qos_shared_state->backend_status[my_slot].pid == MyProcPid
+    #else
+            qos_shared_state->backend_status[MyBackendId - 1].pid == MyProcPid
+    #endif
+        )
+        {
+    #ifndef MyBackendId
+            qos_shared_state->backend_status[my_slot].in_transaction = false;
+    #else
             qos_shared_state->backend_status[MyBackendId - 1].in_transaction = false;
+    #endif
+        }
         
         LWLockRelease(qos_shared_state->lock);
     }

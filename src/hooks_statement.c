@@ -21,7 +21,6 @@
 #include "nodes/nodes.h"
 #include "miscadmin.h"
 #include "storage/proc.h"
-#include "storage/backendid.h"
 
 /* Per-backend statement tracking */
 static CmdType current_statement_type = CMD_UNKNOWN;
@@ -37,6 +36,9 @@ qos_track_statement_start(CmdType operation)
     int count = 0;
     int i;
     int limit_val = -1;
+#ifndef MyBackendId
+    int my_slot = -1;
+#endif
     
     if (!qos_enabled || statement_tracked)
         return;    
@@ -55,6 +57,9 @@ qos_track_statement_start(CmdType operation)
     
     if (qos_shared_state)
     {
+#ifndef MyBackendId
+    my_slot = qos_get_backend_slot(true);
+#endif
         LWLockAcquire(qos_shared_state->lock, LW_EXCLUSIVE);
         
         /* Scan active backends to count current usage */
@@ -65,8 +70,13 @@ qos_track_statement_start(CmdType operation)
                 continue;
                 
             /* Skip myself */
+#ifndef MyBackendId
+            if (i == my_slot)
+                continue;
+#else
             if (i == MyBackendId - 1)
                 continue;
+#endif
             
             /* Count if matches my role, db, and operation */
             if (qos_shared_state->backend_status[i].role_oid == GetUserId() &&
@@ -104,10 +114,19 @@ qos_track_statement_start(CmdType operation)
         }
         
         /* Register myself */
+    #ifndef MyBackendId
+        if (my_slot >= 0)
+        {
+            qos_shared_state->backend_status[my_slot].role_oid = GetUserId();
+            qos_shared_state->backend_status[my_slot].database_oid = MyDatabaseId;
+            qos_shared_state->backend_status[my_slot].cmd_type = operation;
+        }
+    #else
         qos_shared_state->backend_status[MyBackendId - 1].pid = MyProcPid;
         qos_shared_state->backend_status[MyBackendId - 1].role_oid = GetUserId();
         qos_shared_state->backend_status[MyBackendId - 1].database_oid = MyDatabaseId;
         qos_shared_state->backend_status[MyBackendId - 1].cmd_type = operation;
+    #endif
         /* Preserve in_transaction state */
         
         LWLockRelease(qos_shared_state->lock);
@@ -124,18 +143,27 @@ qos_track_statement_start(CmdType operation)
 void
 qos_track_statement_end(void)
 {
+#ifndef MyBackendId
+    int my_slot = -1;
+#endif
     if (!qos_enabled || !statement_tracked)
         return;
     
     if (qos_shared_state)
     {
+#ifndef MyBackendId
+    my_slot = qos_get_backend_slot(false);
+#endif
         LWLockAcquire(qos_shared_state->lock, LW_EXCLUSIVE);
         
         /* Clear my command type */
+#ifndef MyBackendId
+        if (my_slot >= 0 && qos_shared_state->backend_status[my_slot].pid == MyProcPid)
+            qos_shared_state->backend_status[my_slot].cmd_type = CMD_UNKNOWN;
+#else
         if (qos_shared_state->backend_status[MyBackendId - 1].pid == MyProcPid)
-        {
             qos_shared_state->backend_status[MyBackendId - 1].cmd_type = CMD_UNKNOWN;
-        }
+#endif
         
         LWLockRelease(qos_shared_state->lock);
     }

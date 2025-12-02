@@ -39,6 +39,68 @@ static planner_hook_type prev_planner_hook = NULL;
 /* Flag to suppress concurrency tracking in planner (for EXPLAIN/PREPARE) */
 static bool suppress_concurrency_tracking = false;
 
+/* For version 17+ */
+#ifndef MyBackendId
+static int qos_backend_slot = -1;
+
+int
+qos_get_backend_slot(bool allocate_if_missing)
+{
+    int slot;
+    int i;
+
+    if (!qos_shared_state)
+        return -1;
+
+    slot = qos_backend_slot;
+    if (slot >= 0 && qos_shared_state->backend_status[slot].pid == MyProcPid)
+        return slot;
+
+    LWLockAcquire(qos_shared_state->lock, LW_EXCLUSIVE);
+
+    slot = qos_backend_slot;
+    if (slot >= 0 && qos_shared_state->backend_status[slot].pid == MyProcPid)
+    {
+        LWLockRelease(qos_shared_state->lock);
+        return slot;
+    }
+
+    for (i = 0; i < qos_shared_state->max_backends; i++)
+    {
+        if (qos_shared_state->backend_status[i].pid == MyProcPid)
+        {
+            slot = i;
+            break;
+        }
+    }
+
+    if (slot < 0 && allocate_if_missing)
+    {
+        for (i = 0; i < qos_shared_state->max_backends; i++)
+        {
+            if (qos_shared_state->backend_status[i].pid == 0)
+            {
+                qos_shared_state->backend_status[i].pid = MyProcPid;
+                slot = i;
+                break;
+            }
+        }
+    }
+
+    qos_backend_slot = slot;
+
+    LWLockRelease(qos_shared_state->lock);
+
+    return slot;
+}
+
+void
+qos_reset_backend_slot(void)
+{
+    qos_backend_slot = -1;
+}
+#endif /* MyBackendId */
+
 /*
  * Transaction callback to handle cleanup on abort/error
  */
