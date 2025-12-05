@@ -2,10 +2,15 @@
 
 PostgreSQL extension that provides Quality of Service (QoS) style resource governance for sessions and queries.
 
-- Enforce per-role and per-database limits via `ALTER ROLE/DATABASE SET qos.*`
-- Limit work_mem per session
+## Purpose of the extension
+To provide isolation in environments where multiple databases—especially in vertical setups—run within the same cluster, 
+ensuring that the resource usage of one database does not affect the others. The goal is to avoid unnecessary resource dedication 
+and to prevent complicating maintenance/administration processes by eliminating the need to separate databases into new instances to in order to achieve this isolation.
+
 - Limit CPU usage by binding the backend to N CPU cores (Linux only); planner integration ensures parallel workers stay within that cap
 - Track and cap concurrent transactions and statements (SELECT/UPDATE/DELETE/INSERT)
+- Limit work_mem per session
+- Enforce per-role and per-database limits via `ALTER ROLE/DATABASE SET qos.*`
 - Fast, reliable cache invalidation across sessions (no reconnect) using a shared epoch mechanism
 
 ## Requirements
