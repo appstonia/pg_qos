@@ -30,13 +30,19 @@
 #include "catalog/pg_db_role_setting.h"
 #include "utils/syscache.h"
 #include "access/xact.h"
+#include "access/transam.h"
 #include "utils/array.h"
 #include "access/genam.h"
 #include "access/htup_details.h"
 #include "access/table.h"
 #include "utils/fmgroids.h"
 #include "utils/rel.h"
+#include "catalog/indexing.h"
 #include <strings.h>
+#include <ctype.h>
+#include <errno.h>
+#include <limits.h>
+#include <stdint.h>
 
 PG_MODULE_MAGIC;
 
@@ -54,6 +60,29 @@ static shmem_request_hook_type prev_shmem_request_hook = NULL;
 static void qos_shmem_request(void);
 static void qos_shmem_startup(void);
 static void parse_role_configs(ArrayType *configs, QoSLimits *limits);
+
+static const char *qos_valid_param_hint =
+    "Valid parameters: qos.work_mem_limit, qos.cpu_core_limit, "
+    "qos.max_concurrent_tx, qos.max_concurrent_select, "
+    "qos.max_concurrent_update, qos.max_concurrent_delete, "
+    "qos.max_concurrent_insert";
+
+static char *qos_trim_whitespace(char *str);
+static bool qos_parse_int32_value(const char *value_str, int *out,
+                                  int min_value, int max_value,
+                                  bool allow_negative_one,
+                                  const char *param_name, bool strict);
+static bool qos_parse_memory_value(const char *value_str, int64 *out,
+                                   const char *param_name, bool strict);
+static bool qos_is_valid_qos_param_name_internal(const char *name);
+static bool qos_is_valid_qos_setting_entry(const char *config_str);
+static ArrayType *qos_cleanup_invalid_qos_settings(Relation rel, HeapTuple tuple,
+                                                   ArrayType *configs);
+static char *qos_normalize_work_mem_value(const char *value_str);
+
+bool qos_is_valid_qos_param_name(const char *name);
+bool qos_apply_qos_param_value(QoSLimits *limits, const char *name,
+                               const char *value, bool strict);
 
 PG_FUNCTION_INFO_V1(qos_version);
 PG_FUNCTION_INFO_V1(qos_get_stats);
@@ -179,13 +208,14 @@ parse_role_configs(ArrayType *configs, QoSLimits *limits)
     for (i = 0; i < nelems; i++)
     {
         char *config_str;
-        char *name, *value;
-        
+        char *name;
+        char *value;
+
         if (nulls[i])
             continue;
-        
+
         config_str = TextDatumGetCString(elems[i]);
-        
+
         /* Parse "name=value" format */
         name = config_str;
         value = strchr(config_str, '=');
@@ -193,28 +223,582 @@ parse_role_configs(ArrayType *configs, QoSLimits *limits)
         {
             *value = '\0';
             value++;
-            
-            if (strcmp(name, "qos.work_mem_limit") == 0)
-                limits->work_mem_limit = qos_parse_memory_unit(value);
-            else if (strcmp(name, "qos.cpu_core_limit") == 0)
-                limits->cpu_core_limit = atoi(value);
-            else if (strcmp(name, "qos.max_concurrent_tx") == 0)
-                limits->max_concurrent_tx = atoi(value);
-            else if (strcmp(name, "qos.max_concurrent_select") == 0)
-                limits->max_concurrent_select = atoi(value);
-            else if (strcmp(name, "qos.max_concurrent_update") == 0)
-                limits->max_concurrent_update = atoi(value);
-            else if (strcmp(name, "qos.max_concurrent_delete") == 0)
-                limits->max_concurrent_delete = atoi(value);
-            else if (strcmp(name, "qos.max_concurrent_insert") == 0)
-                limits->max_concurrent_insert = atoi(value);            
+
+            name = qos_trim_whitespace(name);
+            value = qos_trim_whitespace(value);
+
+            if (pg_strncasecmp(name, "qos.", 4) == 0)
+                (void) qos_apply_qos_param_value(limits, name, value, false);
         }
-        
+        else if (pg_strncasecmp(config_str, "qos.", 4) == 0)
+        {
+            elog(DEBUG1, "qos: invalid parameter format \"%s\" (expected name=value)",
+                 config_str);
+        }
+
         pfree(config_str);
     }
-    
+
     pfree(elems);
     pfree(nulls);
+}
+
+static char *
+qos_trim_whitespace(char *str)
+{
+    char *end;
+
+    if (str == NULL)
+        return NULL;
+
+    while (*str != '\0' && isspace((unsigned char) *str))
+        str++;
+
+    if (*str == '\0')
+        return str;
+
+    end = str + strlen(str) - 1;
+    while (end > str && isspace((unsigned char) *end))
+    {
+        *end = '\0';
+        end--;
+    }
+
+    return str;
+}
+
+static bool
+qos_parse_int32_value(const char *value_str, int *out,
+                      int min_value, int max_value,
+                      bool allow_negative_one,
+                      const char *param_name, bool strict)
+{
+    char *endptr;
+    long value;
+
+    if (value_str == NULL || *value_str == '\0')
+        goto invalid;
+
+    errno = 0;
+    value = strtol(value_str, &endptr, 10);
+    if (endptr == value_str || *endptr != '\0' || errno == ERANGE)
+        goto invalid;
+
+    if (allow_negative_one && value == -1)
+    {
+        if (out)
+            *out = -1;
+        return true;
+    }
+
+    if (value < min_value || value > max_value)
+        goto invalid;
+
+    if (out)
+        *out = (int) value;
+    return true;
+
+invalid:
+    if (strict)
+        ereport(ERROR,
+                (errmsg("qos: invalid value for %s: \"%s\"", param_name, value_str)));
+    else
+        elog(DEBUG1, "qos: invalid value for %s: \"%s\" (ignored)", param_name, value_str);
+    return false;
+}
+
+static bool
+qos_parse_memory_value(const char *value_str, int64 *out,
+                       const char *param_name, bool strict)
+{
+    char *endptr;
+    long long base;
+    int64 multiplier = 1;
+    const char *suffix;
+
+    if (value_str == NULL || *value_str == '\0')
+        goto invalid;
+
+    errno = 0;
+    base = strtoll(value_str, &endptr, 10);
+    if (endptr == value_str || errno == ERANGE)
+        goto invalid;
+
+    suffix = endptr;
+    while (*suffix != '\0' && isspace((unsigned char) *suffix))
+        suffix++;
+
+    if (*suffix != '\0')
+    {
+        if (pg_strcasecmp(suffix, "kb") == 0 || pg_strcasecmp(suffix, "k") == 0)
+            multiplier = 1024L;
+        else if (pg_strcasecmp(suffix, "mb") == 0 || pg_strcasecmp(suffix, "m") == 0)
+            multiplier = 1024L * 1024L;
+        else if (pg_strcasecmp(suffix, "gb") == 0 || pg_strcasecmp(suffix, "g") == 0)
+            multiplier = 1024L * 1024L * 1024L;
+        else
+            goto invalid;
+    }
+
+    if (base == -1 && *suffix != '\0')
+        goto invalid;
+
+    if (base < -1)
+        goto invalid;
+
+    if (base > 0 && multiplier > 1)
+    {
+        if ((int64) base > (INT64_MAX / multiplier))
+            goto invalid;
+    }
+
+    if (out)
+        *out = (int64) base * multiplier;
+    return true;
+
+invalid:
+    if (strict)
+        ereport(ERROR,
+                (errmsg("qos: invalid value for %s: \"%s\"", param_name, value_str),
+                 errdetail("Expected a number with optional unit (kB, MB, GB) or -1.")));
+    else
+        elog(DEBUG1, "qos: invalid value for %s: \"%s\" (ignored)", param_name, value_str);
+    return false;
+}
+
+static bool
+qos_is_valid_qos_param_name_internal(const char *name)
+{
+    if (name == NULL)
+        return false;
+
+    if (strcmp(name, "qos.work_mem_limit") == 0)
+        return true;
+    if (strcmp(name, "qos.cpu_core_limit") == 0)
+        return true;
+    if (strcmp(name, "qos.max_concurrent_tx") == 0)
+        return true;
+    if (strcmp(name, "qos.max_concurrent_select") == 0)
+        return true;
+    if (strcmp(name, "qos.max_concurrent_update") == 0)
+        return true;
+    if (strcmp(name, "qos.max_concurrent_delete") == 0)
+        return true;
+    if (strcmp(name, "qos.max_concurrent_insert") == 0)
+        return true;
+    if (strcmp(name, "qos.enabled") == 0)
+        return true;
+
+    return false;
+}
+
+bool
+qos_is_valid_qos_param_name(const char *name)
+{
+    return qos_is_valid_qos_param_name_internal(name);
+}
+
+bool
+qos_apply_qos_param_value(QoSLimits *limits, const char *name,
+                          const char *value, bool strict)
+{
+    int parsed_int = -1;
+    int64 parsed_mem = -1;
+    char *value_copy = NULL;
+    char *trimmed_value = NULL;
+
+    if (name == NULL)
+        return false;
+
+    if (pg_strncasecmp(name, "qos.", 4) != 0)
+        return false;
+
+    if (!qos_is_valid_qos_param_name_internal(name))
+    {
+        if (strict)
+            ereport(ERROR,
+                    (errmsg("qos: invalid parameter name \"%s\"", name),
+                     errhint("%s", qos_valid_param_hint)));
+        else
+            elog(DEBUG1, "qos: invalid parameter name \"%s\" (ignored)", name);
+        return false;
+    }
+
+    if (strcmp(name, "qos.enabled") == 0)
+        return true;
+
+    if (value == NULL)
+    {
+        if (strict)
+            ereport(ERROR,
+                    (errmsg("qos: missing value for parameter \"%s\"", name)));
+        else
+            elog(DEBUG1, "qos: missing value for parameter \"%s\" (ignored)", name);
+        return false;
+    }
+
+    value_copy = pstrdup(value);
+    trimmed_value = qos_trim_whitespace(value_copy);
+
+    if (strcmp(name, "qos.work_mem_limit") == 0)
+    {
+        if (!qos_parse_memory_value(trimmed_value, &parsed_mem, name, strict))
+        {
+            pfree(value_copy);
+            return false;
+        }
+        if (limits)
+            limits->work_mem_limit = parsed_mem;
+        pfree(value_copy);
+        return true;
+    }
+
+    if (strcmp(name, "qos.cpu_core_limit") == 0)
+    {
+        if (!qos_parse_int32_value(trimmed_value, &parsed_int, 0, INT_MAX, true, name, strict))
+        {
+            pfree(value_copy);
+            return false;
+        }
+        if (limits)
+            limits->cpu_core_limit = parsed_int;
+        pfree(value_copy);
+        return true;
+    }
+
+    if (strcmp(name, "qos.max_concurrent_tx") == 0)
+    {
+        if (!qos_parse_int32_value(trimmed_value, &parsed_int, 0, INT_MAX, true, name, strict))
+        {
+            pfree(value_copy);
+            return false;
+        }
+        if (limits)
+            limits->max_concurrent_tx = parsed_int;
+        pfree(value_copy);
+        return true;
+    }
+
+    if (strcmp(name, "qos.max_concurrent_select") == 0)
+    {
+        if (!qos_parse_int32_value(trimmed_value, &parsed_int, 0, INT_MAX, true, name, strict))
+        {
+            pfree(value_copy);
+            return false;
+        }
+        if (limits)
+            limits->max_concurrent_select = parsed_int;
+        pfree(value_copy);
+        return true;
+    }
+
+    if (strcmp(name, "qos.max_concurrent_update") == 0)
+    {
+        if (!qos_parse_int32_value(trimmed_value, &parsed_int, 0, INT_MAX, true, name, strict))
+        {
+            pfree(value_copy);
+            return false;
+        }
+        if (limits)
+            limits->max_concurrent_update = parsed_int;
+        pfree(value_copy);
+        return true;
+    }
+
+    if (strcmp(name, "qos.max_concurrent_delete") == 0)
+    {
+        if (!qos_parse_int32_value(trimmed_value, &parsed_int, 0, INT_MAX, true, name, strict))
+        {
+            pfree(value_copy);
+            return false;
+        }
+        if (limits)
+            limits->max_concurrent_delete = parsed_int;
+        pfree(value_copy);
+        return true;
+    }
+
+    if (strcmp(name, "qos.max_concurrent_insert") == 0)
+    {
+        if (!qos_parse_int32_value(trimmed_value, &parsed_int, 0, INT_MAX, true, name, strict))
+        {
+            pfree(value_copy);
+            return false;
+        }
+        if (limits)
+            limits->max_concurrent_insert = parsed_int;
+        pfree(value_copy);
+        return true;
+    }
+
+    if (value_copy)
+        pfree(value_copy);
+    return false;
+}
+
+static bool
+qos_is_valid_qos_setting_entry(const char *config_str)
+{
+    char *copy;
+    char *name;
+    char *value;
+    bool valid = false;
+
+    if (config_str == NULL)
+        return false;
+
+    copy = pstrdup(config_str);
+    name = copy;
+    value = strchr(copy, '=');
+    if (!value)
+    {
+        pfree(copy);
+        return false;
+    }
+
+    *value = '\0';
+    value++;
+
+    name = qos_trim_whitespace(name);
+    value = qos_trim_whitespace(value);
+
+    if (pg_strncasecmp(name, "qos.", 4) != 0)
+    {
+        pfree(copy);
+        return true;
+    }
+
+    valid = qos_apply_qos_param_value(NULL, name, value, false);
+    pfree(copy);
+    return valid;
+}
+
+static char *
+qos_normalize_work_mem_value(const char *value_str)
+{
+    const char *ptr;
+    const char *num_start;
+    const char *unit_start;
+    size_t num_len;
+    char *num_part;
+    char *unit_part;
+    const char *normalized_unit = NULL;
+
+    if (value_str == NULL)
+        return NULL;
+
+    ptr = value_str;
+    while (*ptr != '\0' && isspace((unsigned char) *ptr))
+        ptr++;
+
+    num_start = ptr;
+    while (*ptr != '\0' && isdigit((unsigned char) *ptr))
+        ptr++;
+
+    if (ptr == num_start)
+        return NULL;
+
+    num_len = (size_t) (ptr - num_start);
+    num_part = palloc(num_len + 1);
+    memcpy(num_part, num_start, num_len);
+    num_part[num_len] = '\0';
+
+    while (*ptr != '\0' && isspace((unsigned char) *ptr))
+        ptr++;
+
+    unit_start = ptr;
+    while (*ptr != '\0' && isalpha((unsigned char) *ptr))
+        ptr++;
+
+    if (*ptr != '\0')
+    {
+        pfree(num_part);
+        return NULL;
+    }
+
+    if (unit_start == ptr)
+    {
+        normalized_unit = "MB";
+    }
+    else
+    {
+        unit_part = pnstrdup(unit_start, ptr - unit_start);
+        if (pg_strcasecmp(unit_part, "k") == 0 || pg_strcasecmp(unit_part, "kb") == 0)
+            normalized_unit = "kB";
+        else if (pg_strcasecmp(unit_part, "m") == 0 || pg_strcasecmp(unit_part, "mb") == 0)
+            normalized_unit = "MB";
+        else if (pg_strcasecmp(unit_part, "g") == 0 || pg_strcasecmp(unit_part, "gb") == 0)
+            normalized_unit = "GB";
+        pfree(unit_part);
+    }
+
+    if (!normalized_unit)
+    {
+        pfree(num_part);
+        return NULL;
+    }
+
+    {
+        char *result = psprintf("%s%s", num_part, normalized_unit);
+        pfree(num_part);
+        return result;
+    }
+}
+
+static ArrayType *
+qos_cleanup_invalid_qos_settings(Relation rel, HeapTuple tuple, ArrayType *configs)
+{
+    int nelems;
+    Datum *elems;
+    bool *nulls;
+    int i;
+    int kept = 0;
+    bool removed = false;
+    Datum *new_elems;
+    ArrayType *new_configs;
+    static Oid last_cleaned_db = InvalidOid;
+    static Oid last_cleaned_role = InvalidOid;
+    static CommandId last_cleaned_cmdid = InvalidCommandId;
+    Oid setdatabase;
+    Oid setrole;
+    CommandId cmdid;
+    bool isnull;
+
+    if (!configs)
+        return configs;
+
+    nelems = ArrayGetNItems(ARR_NDIM(configs), ARR_DIMS(configs));
+    if (nelems <= 0)
+        return configs;
+
+    cmdid = GetCurrentCommandId(false);
+    setdatabase = DatumGetObjectId(heap_getattr(tuple, Anum_pg_db_role_setting_setdatabase,
+                                                RelationGetDescr(rel), &isnull));
+    if (isnull)
+        setdatabase = InvalidOid;
+    setrole = DatumGetObjectId(heap_getattr(tuple, Anum_pg_db_role_setting_setrole,
+                                            RelationGetDescr(rel), &isnull));
+    if (isnull)
+        setrole = InvalidOid;
+
+    if (cmdid == last_cleaned_cmdid &&
+        setdatabase == last_cleaned_db &&
+        setrole == last_cleaned_role)
+        return configs;
+
+    deconstruct_array(configs, TEXTOID, -1, false, TYPALIGN_INT,
+                      &elems, &nulls, &nelems);
+
+    new_elems = (Datum *) palloc(sizeof(Datum) * nelems);
+
+    for (i = 0; i < nelems; i++)
+    {
+        char *config_str;
+
+        if (nulls[i])
+        {
+            removed = true;
+            continue;
+        }
+
+        config_str = TextDatumGetCString(elems[i]);
+        if (pg_strncasecmp(config_str, "qos.", 4) == 0)
+        {
+            char *copy;
+            char *name;
+            char *value;
+
+            if (!qos_is_valid_qos_setting_entry(config_str))
+            {
+                removed = true;
+                pfree(config_str);
+                continue;
+            }
+
+            copy = pstrdup(config_str);
+            name = copy;
+            value = strchr(copy, '=');
+            if (value)
+            {
+                *value = '\0';
+                value++;
+
+                name = qos_trim_whitespace(name);
+                value = qos_trim_whitespace(value);
+
+                if (strcmp(name, "qos.work_mem_limit") == 0)
+                {
+                    char *normalized_value = qos_normalize_work_mem_value(value);
+
+                    if (normalized_value && strcmp(normalized_value, value) != 0)
+                    {
+                        char *normalized = psprintf("%s=%s", name, normalized_value);
+
+                        new_elems[kept++] = CStringGetTextDatum(normalized);
+                        removed = true;
+                        pfree(normalized_value);
+                        pfree(normalized);
+                        pfree(copy);
+                        pfree(config_str);
+                        continue;
+                    }
+
+                    if (normalized_value)
+                        pfree(normalized_value);
+                }
+            }
+
+            pfree(copy);
+        }
+
+        new_elems[kept++] = CStringGetTextDatum(config_str);
+        pfree(config_str);
+    }
+
+    if (!removed)
+    {
+        pfree(new_elems);
+        pfree(elems);
+        pfree(nulls);
+        return configs;
+    }
+
+    if (kept > 0)
+        new_configs = construct_array(new_elems, kept, TEXTOID, -1, false, TYPALIGN_INT);
+    else
+        new_configs = construct_empty_array(TEXTOID);
+
+    {
+        Datum values[Natts_pg_db_role_setting];
+        bool nulls_replace[Natts_pg_db_role_setting];
+        bool replaces[Natts_pg_db_role_setting];
+        HeapTuple newtuple;
+        int j;
+
+        for (j = 0; j < Natts_pg_db_role_setting; j++)
+        {
+            values[j] = (Datum) 0;
+            nulls_replace[j] = false;
+            replaces[j] = false;
+        }
+
+        values[Anum_pg_db_role_setting_setconfig - 1] = PointerGetDatum(new_configs);
+        replaces[Anum_pg_db_role_setting_setconfig - 1] = true;
+
+        newtuple = heap_modify_tuple(tuple, RelationGetDescr(rel), values, nulls_replace, replaces);
+        CatalogTupleUpdate(rel, &newtuple->t_self, newtuple);
+        heap_freetuple(newtuple);
+    }
+
+    last_cleaned_db = setdatabase;
+    last_cleaned_role = setrole;
+    last_cleaned_cmdid = cmdid;
+
+    pfree(new_elems);
+    pfree(elems);
+    pfree(nulls);
+
+    return new_configs;
 }
 
 /*
@@ -239,7 +823,7 @@ qos_get_role_limits(Oid roleId)
     limits.max_concurrent_insert = -1;
     
     /* Open pg_db_role_setting catalog */
-    pg_db_role_setting_rel = table_open(DbRoleSettingRelationId, AccessShareLock);
+    pg_db_role_setting_rel = table_open(DbRoleSettingRelationId, RowExclusiveLock);
     
     /* Scan for this role's settings (setdatabase = 0 means all databases) */
     ScanKeyInit(&scankey[0],
@@ -266,16 +850,20 @@ qos_get_role_limits(Oid roleId)
         if (!isnull)
         {
             ArrayType *configs = DatumGetArrayTypeP(configDatum);
-            parse_role_configs(configs, &limits);
+            ArrayType *cleaned_configs = qos_cleanup_invalid_qos_settings(pg_db_role_setting_rel,
+                                                                         tuple, configs);
+            parse_role_configs(cleaned_configs, &limits);
             
             /* Free detoasted copy if it was created */
             if ((Pointer) configs != DatumGetPointer(configDatum))
                 pfree(configs);
+            if (cleaned_configs != configs && (Pointer) cleaned_configs != DatumGetPointer(configDatum))
+                pfree(cleaned_configs);
         }
     }
     
     systable_endscan(scan);
-    table_close(pg_db_role_setting_rel, AccessShareLock);
+    table_close(pg_db_role_setting_rel, RowExclusiveLock);
     
     return limits;
 }
@@ -302,7 +890,7 @@ qos_get_database_limits(Oid dbId)
     limits.max_concurrent_insert = -1;
     
     /* Open pg_db_role_setting catalog */
-    pg_db_role_setting_rel = table_open(DbRoleSettingRelationId, AccessShareLock);
+    pg_db_role_setting_rel = table_open(DbRoleSettingRelationId, RowExclusiveLock);
     
     /* Scan for this database's settings (setrole = 0 means all roles) */
     ScanKeyInit(&scankey[0],
@@ -329,16 +917,20 @@ qos_get_database_limits(Oid dbId)
         if (!isnull)
         {
             ArrayType *configs = DatumGetArrayTypeP(configDatum);
-            parse_role_configs(configs, &limits);
+            ArrayType *cleaned_configs = qos_cleanup_invalid_qos_settings(pg_db_role_setting_rel,
+                                                                         tuple, configs);
+            parse_role_configs(cleaned_configs, &limits);
             
             /* Free detoasted copy if it was created */
             if ((Pointer) configs != DatumGetPointer(configDatum))
                 pfree(configs);
+            if (cleaned_configs != configs && (Pointer) cleaned_configs != DatumGetPointer(configDatum))
+                pfree(cleaned_configs);
         }
     }
     
     systable_endscan(scan);
-    table_close(pg_db_role_setting_rel, AccessShareLock);
+    table_close(pg_db_role_setting_rel, RowExclusiveLock);
     
     return limits;
 }

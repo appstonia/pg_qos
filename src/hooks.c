@@ -29,6 +29,10 @@
 #include "optimizer/planner.h"
 #include "commands/defrem.h"
 #include "access/xact.h"
+#include "nodes/makefuncs.h"
+#include "parser/parse_node.h"
+#include "nodes/value.h"
+#include <ctype.h>
 
 /* Hook save variables */
 static ProcessUtility_hook_type prev_ProcessUtility = NULL;
@@ -38,6 +42,12 @@ static planner_hook_type prev_planner_hook = NULL;
 
 /* Flag to suppress concurrency tracking in planner (for EXPLAIN/PREPARE) */
 static bool suppress_concurrency_tracking = false;
+
+static void qos_validate_qos_setstmt(VariableSetStmt *stmt);
+static char *qos_normalize_work_mem_value(const char *value_str);
+#if PG_VERSION_NUM >= 170000
+static A_Const *qos_make_string_const(const char *str, int location);
+#endif
 
 /* For version 17+ */
 #ifndef MyBackendId
@@ -157,6 +167,183 @@ qos_planner(Query *parse, const char *query_string, int cursorOptions, ParamList
     return qos_planner_hook(parse, query_string, cursorOptions, boundParams, prev_planner_hook);
 }
 
+static char *
+qos_normalize_work_mem_value(const char *value_str)
+{
+    const char *ptr;
+    const char *num_start;
+    const char *unit_start;
+    size_t num_len;
+    char *num_part;
+    char *unit_part;
+    const char *normalized_unit = NULL;
+
+    if (value_str == NULL)
+        return NULL;
+
+    ptr = value_str;
+    while (*ptr != '\0' && isspace((unsigned char) *ptr))
+        ptr++;
+
+    num_start = ptr;
+    while (*ptr != '\0' && isdigit((unsigned char) *ptr))
+        ptr++;
+
+    if (ptr == num_start)
+        return NULL;
+
+    num_len = (size_t) (ptr - num_start);
+    num_part = palloc(num_len + 1);
+    memcpy(num_part, num_start, num_len);
+    num_part[num_len] = '\0';
+
+    while (*ptr != '\0' && isspace((unsigned char) *ptr))
+        ptr++;
+
+    unit_start = ptr;
+    while (*ptr != '\0' && isalpha((unsigned char) *ptr))
+        ptr++;
+
+    if (*ptr != '\0')
+    {
+        pfree(num_part);
+        return NULL;
+    }
+
+    if (unit_start == ptr)
+    {
+        normalized_unit = "MB";
+    }
+    else
+    {
+        unit_part = pnstrdup(unit_start, ptr - unit_start);
+        if (pg_strcasecmp(unit_part, "k") == 0 || pg_strcasecmp(unit_part, "kb") == 0)
+            normalized_unit = "kB";
+        else if (pg_strcasecmp(unit_part, "m") == 0 || pg_strcasecmp(unit_part, "mb") == 0)
+            normalized_unit = "MB";
+        else if (pg_strcasecmp(unit_part, "g") == 0 || pg_strcasecmp(unit_part, "gb") == 0)
+            normalized_unit = "GB";
+        pfree(unit_part);
+    }
+
+    if (!normalized_unit)
+    {
+        pfree(num_part);
+        return NULL;
+    }
+
+    {
+        char *result = psprintf("%s%s", num_part, normalized_unit);
+        pfree(num_part);
+        return result;
+    }
+}
+
+static void
+qos_validate_qos_setstmt(VariableSetStmt *stmt)
+{
+    const char *value_str = NULL;
+    char *formatted_value = NULL;
+    Node *arg;
+
+    if (!stmt || !stmt->name)
+        return;
+
+    if (pg_strncasecmp(stmt->name, "qos.", 4) != 0)
+        return;
+
+    if (!qos_is_valid_qos_param_name(stmt->name))
+    {
+        ereport(ERROR,
+                (errmsg("qos: invalid parameter name \"%s\"", stmt->name),
+                 errhint("Valid parameters: qos.work_mem_limit, qos.cpu_core_limit, qos.max_concurrent_tx, "
+                         "qos.max_concurrent_select, qos.max_concurrent_update, qos.max_concurrent_delete, "
+                         "qos.max_concurrent_insert")));
+    }
+
+    if (strcmp(stmt->name, "qos.enabled") == 0)
+        return;
+
+    switch (stmt->kind)
+    {
+        case VAR_SET_VALUE:
+            if (stmt->args == NIL)
+                ereport(ERROR,
+                        (errmsg("qos: missing value for parameter \"%s\"", stmt->name)));
+
+            arg = (Node *) linitial(stmt->args);
+            if (!IsA(arg, A_Const))
+                ereport(ERROR,
+                        (errmsg("qos: invalid value for parameter \"%s\"", stmt->name)));
+
+            if (nodeTag(&((A_Const *) arg)->val) == T_Integer)
+            {
+                formatted_value = psprintf("%ld", (long) intVal(&((A_Const *) arg)->val));
+                value_str = formatted_value;
+            }
+            else if (nodeTag(&((A_Const *) arg)->val) == T_Float)
+            {
+                value_str = strVal(&((A_Const *) arg)->val);
+            }
+            else if (nodeTag(&((A_Const *) arg)->val) == T_String)
+            {
+                value_str = strVal(&((A_Const *) arg)->val);
+            }
+            else
+            {
+                ereport(ERROR,
+                        (errmsg("qos: invalid value for parameter \"%s\"", stmt->name)));
+            }
+
+            if (strcmp(stmt->name, "qos.work_mem_limit") == 0 && value_str != NULL)
+            {
+                char *normalized = qos_normalize_work_mem_value(value_str);
+
+                if (normalized && strcmp(normalized, value_str) != 0)
+                {
+#if PG_VERSION_NUM >= 170000
+                    A_Const *newconst = qos_make_string_const(normalized, -1);
+
+                    stmt->args = list_make1(newconst);
+                    value_str = strVal(&newconst->val);
+#else
+                    value_str = normalized;
+#endif
+                }
+
+                qos_apply_qos_param_value(NULL, stmt->name, value_str, true);
+
+                if (normalized && normalized != value_str)
+                    pfree(normalized);
+            }
+            else
+            {
+                qos_apply_qos_param_value(NULL, stmt->name, value_str, true);
+            }
+            if (formatted_value)
+                pfree(formatted_value);
+            break;
+
+        case VAR_SET_DEFAULT:
+        case VAR_SET_CURRENT:
+        case VAR_RESET:
+        case VAR_RESET_ALL:
+            break;
+
+        default:
+            ereport(ERROR,
+                    (errmsg("qos: unsupported SET option for parameter \"%s\"", stmt->name)));
+    }
+}
+
+#if PG_VERSION_NUM >= 170000
+static A_Const *
+qos_make_string_const(const char *str, int location)
+{
+    return (A_Const *) makeStringConst(pstrdup(str), location);
+}
+#endif
+
 /*
  * ProcessUtility hook - intercept SET commands
  */
@@ -188,9 +375,12 @@ qos_ProcessUtility(PlannedStmt *pstmt,
         qos_enforce_work_mem_limit(stmt);
     }
 
-    /* Detect ALTER ROLE/DB ... SET qos.* to bump global settings epoch */
+    /* Validate qos.* input and detect ALTER ROLE/DB ... SET qos.* */
     if (qos_enabled)
     {
+        if (IsA(parsetree, VariableSetStmt))
+            qos_validate_qos_setstmt((VariableSetStmt *) parsetree);
+
         if (IsA(parsetree, AlterRoleSetStmt))
         {
             AlterRoleSetStmt *as = (AlterRoleSetStmt *) parsetree;
@@ -201,6 +391,9 @@ qos_ProcessUtility(PlannedStmt *pstmt,
             AlterDatabaseSetStmt *as = (AlterDatabaseSetStmt *) parsetree;
             qos_set = as->setstmt;
         }
+
+        if (qos_set)
+            qos_validate_qos_setstmt(qos_set);
 
         if (qos_set && ((qos_set->name && pg_strncasecmp(qos_set->name, "qos.", 4) == 0) ||
                         qos_set->kind == VAR_RESET_ALL))
