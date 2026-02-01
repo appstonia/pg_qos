@@ -110,6 +110,9 @@ extern Datum qos_reset_stats(PG_FUNCTION_ARGS);
 extern QoSLimits qos_get_role_limits(Oid roleId);
 extern QoSLimits qos_get_database_limits(Oid dbId);
 extern int64 qos_parse_memory_unit(const char *str);
+extern bool qos_is_valid_qos_param_name(const char *name);
+extern bool qos_apply_qos_param_value(QoSLimits *limits, const char *name,
+                                      const char *value, bool strict);
 /* cache/epoch notifications */
 extern void qos_notify_settings_change(void);
 
