@@ -30,6 +30,8 @@
 #include "commands/defrem.h"
 #include "access/xact.h"
 #include "nodes/makefuncs.h"
+#include "parser/parse_node.h"
+#include "nodes/value.h"
 #include <ctype.h>
 
 /* Hook save variables */
@@ -43,6 +45,9 @@ static bool suppress_concurrency_tracking = false;
 
 static void qos_validate_qos_setstmt(VariableSetStmt *stmt);
 static char *qos_normalize_work_mem_value(const char *value_str);
+#if PG_VERSION_NUM >= 170000
+static A_Const *qos_make_string_const(const char *str, int location);
+#endif
 
 /* For version 17+ */
 #ifndef MyBackendId
@@ -296,10 +301,14 @@ qos_validate_qos_setstmt(VariableSetStmt *stmt)
 
                 if (normalized && strcmp(normalized, value_str) != 0)
                 {
-                    A_Const *newconst = (A_Const *) makeStringConst(normalized, -1);
+#if PG_VERSION_NUM >= 170000
+                    A_Const *newconst = qos_make_string_const(normalized, -1);
 
                     stmt->args = list_make1(newconst);
                     value_str = strVal(&newconst->val);
+#else
+                    value_str = normalized;
+#endif
                 }
 
                 qos_apply_qos_param_value(NULL, stmt->name, value_str, true);
@@ -326,6 +335,14 @@ qos_validate_qos_setstmt(VariableSetStmt *stmt)
                     (errmsg("qos: unsupported SET option for parameter \"%s\"", stmt->name)));
     }
 }
+
+#if PG_VERSION_NUM >= 170000
+static A_Const *
+qos_make_string_const(const char *str, int location)
+{
+    return (A_Const *) makeStringConst(pstrdup(str), location);
+}
+#endif
 
 /*
  * ProcessUtility hook - intercept SET commands
