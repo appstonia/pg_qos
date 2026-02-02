@@ -150,7 +150,6 @@ qos_refresh_cached_limits(void)
     CALC_LIMIT(max_concurrent_delete);
     CALC_LIMIT(max_concurrent_insert);
     CALC_LIMIT(work_mem_error_level);
-    CALC_LIMIT(work_mem_error_level);
     
     #undef CALC_LIMIT
 
