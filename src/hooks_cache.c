@@ -25,8 +25,8 @@
 #include "catalog/pg_db_role_setting.h"
 #include "access/xact.h"
 
-/* Cached QoS limits - invalidated via syscache callback */
-static QoSLimits cached_limits = {-1, -1, -1, -1, -1, -1, -1};
+/* Cached QoS limits - invalidated via syscache callback (all -1 = unset) */
+static QoSLimits cached_limits = {-1, -1, -1, -1, -1, -1, -1, -1};
 static Oid cached_user_id = InvalidOid;
 static Oid cached_db_id = InvalidOid;
 static bool limits_cached = false;
@@ -149,6 +149,8 @@ qos_refresh_cached_limits(void)
     CALC_LIMIT(max_concurrent_update);
     CALC_LIMIT(max_concurrent_delete);
     CALC_LIMIT(max_concurrent_insert);
+    CALC_LIMIT(work_mem_error_level);
+    CALC_LIMIT(work_mem_error_level);
     
     #undef CALC_LIMIT
 

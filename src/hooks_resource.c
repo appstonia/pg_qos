@@ -536,6 +536,16 @@ qos_enforce_work_mem_limit(VariableSetStmt *stmt)
             /* Check if new value exceeds limit */
             if (new_work_mem_bytes > limits.work_mem_limit)
             {
+                int elevel = (limits.work_mem_error_level == QOS_WORK_MEM_ERROR_ERROR)
+                              ? ERROR
+                              : WARNING;
+                if (elevel == WARNING)
+                {
+                    int new_work_mem_kb = (int)(limits.work_mem_limit / 1024L);
+
+                    work_mem = new_work_mem_kb;
+                }
+
                 if (qos_shared_state)
                 {
                     LWLockAcquire(qos_shared_state->lock, LW_EXCLUSIVE);
@@ -543,7 +553,7 @@ qos_enforce_work_mem_limit(VariableSetStmt *stmt)
                     LWLockRelease(qos_shared_state->lock);
                 }
                 
-                ereport(ERROR,
+                ereport(elevel,
                         (errcode(ERRCODE_INSUFFICIENT_RESOURCES),
                          errmsg("qos: work_mem limit exceeded"),
                          errdetail("Requested %ld KB, maximum allowed is %ld KB",

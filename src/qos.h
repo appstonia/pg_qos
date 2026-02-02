@@ -36,7 +36,14 @@ typedef struct QoSLimits
     int     max_concurrent_update; /* Max concurrent UPDATE statements (-1 = no limit) */
     int     max_concurrent_delete; /* Max concurrent DELETE statements (-1 = no limit) */
     int     max_concurrent_insert; /* Max concurrent INSERT statements (-1 = no limit) */
+    int     work_mem_error_level;  /* QoS work_mem violation severity (-1 = unset) */
 } QoSLimits;
+
+typedef enum QoSWorkMemErrorLevel
+{
+    QOS_WORK_MEM_ERROR_WARNING = 0,
+    QOS_WORK_MEM_ERROR_ERROR = 1
+} QoSWorkMemErrorLevel;
 
 /* QoS Statistics */
 typedef struct QoSStats

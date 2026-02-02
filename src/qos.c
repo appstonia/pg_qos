@@ -65,7 +65,7 @@ static const char *qos_valid_param_hint =
     "Valid parameters: qos.work_mem_limit, qos.cpu_core_limit, "
     "qos.max_concurrent_tx, qos.max_concurrent_select, "
     "qos.max_concurrent_update, qos.max_concurrent_delete, "
-    "qos.max_concurrent_insert";
+    "qos.max_concurrent_insert, qos.work_mem_error_level";
 
 static char *qos_trim_whitespace(char *str);
 static bool qos_parse_int32_value(const char *value_str, int *out,
@@ -74,6 +74,8 @@ static bool qos_parse_int32_value(const char *value_str, int *out,
                                   const char *param_name, bool strict);
 static bool qos_parse_memory_value(const char *value_str, int64 *out,
                                    const char *param_name, bool strict);
+static bool qos_parse_work_mem_error_level(const char *value_str,
+                                           const char *param_name, bool strict);
 static bool qos_is_valid_qos_param_name_internal(const char *name);
 static bool qos_is_valid_qos_setting_entry(const char *config_str);
 static ArrayType *qos_cleanup_invalid_qos_settings(Relation rel, HeapTuple tuple,
@@ -367,6 +369,26 @@ invalid:
 }
 
 static bool
+qos_parse_work_mem_error_level(const char *value_str,
+                               const char *param_name, bool strict)
+{
+    if (value_str == NULL || *value_str == '\0')
+        goto invalid;
+
+    if (pg_strcasecmp(value_str, "warning") == 0 || pg_strcasecmp(value_str, "error") == 0)
+        return true;
+
+invalid:
+    if (strict)
+        ereport(ERROR,
+                (errmsg("qos: invalid value for %s: \"%s\"", param_name, value_str),
+                 errdetail("Expected \"warning\" or \"error\".")));
+    else
+        elog(DEBUG1, "qos: invalid value for %s: \"%s\" (ignored)", param_name, value_str);
+    return false;
+}
+
+static bool
 qos_is_valid_qos_param_name_internal(const char *name)
 {
     if (name == NULL)
@@ -387,6 +409,8 @@ qos_is_valid_qos_param_name_internal(const char *name)
     if (strcmp(name, "qos.max_concurrent_insert") == 0)
         return true;
     if (strcmp(name, "qos.enabled") == 0)
+        return true;
+    if (strcmp(name, "qos.work_mem_error_level") == 0)
         return true;
 
     return false;
@@ -527,6 +551,21 @@ qos_apply_qos_param_value(QoSLimits *limits, const char *name,
         }
         if (limits)
             limits->max_concurrent_insert = parsed_int;
+        pfree(value_copy);
+        return true;
+    }
+
+    if (strcmp(name, "qos.work_mem_error_level") == 0)
+    {
+        if (!qos_parse_work_mem_error_level(trimmed_value, name, strict))
+        {
+            pfree(value_copy);
+            return false;
+        }
+        if (limits)
+            limits->work_mem_error_level = (pg_strcasecmp(trimmed_value, "error") == 0)
+                                             ? QOS_WORK_MEM_ERROR_ERROR
+                                             : QOS_WORK_MEM_ERROR_WARNING;
         pfree(value_copy);
         return true;
     }
@@ -821,6 +860,7 @@ qos_get_role_limits(Oid roleId)
     limits.max_concurrent_update = -1;
     limits.max_concurrent_delete = -1;
     limits.max_concurrent_insert = -1;
+    limits.work_mem_error_level = -1;
     
     /* Open pg_db_role_setting catalog */
     pg_db_role_setting_rel = table_open(DbRoleSettingRelationId, RowExclusiveLock);
@@ -888,6 +928,7 @@ qos_get_database_limits(Oid dbId)
     limits.max_concurrent_update = -1;
     limits.max_concurrent_delete = -1;
     limits.max_concurrent_insert = -1;
+    limits.work_mem_error_level = -1;
     
     /* Open pg_db_role_setting catalog */
     pg_db_role_setting_rel = table_open(DbRoleSettingRelationId, RowExclusiveLock);

@@ -258,7 +258,7 @@ qos_validate_qos_setstmt(VariableSetStmt *stmt)
                 (errmsg("qos: invalid parameter name \"%s\"", stmt->name),
                  errhint("Valid parameters: qos.work_mem_limit, qos.cpu_core_limit, qos.max_concurrent_tx, "
                          "qos.max_concurrent_select, qos.max_concurrent_update, qos.max_concurrent_delete, "
-                         "qos.max_concurrent_insert")));
+                 "qos.max_concurrent_insert, qos.work_mem_error_level")));
     }
 
     if (strcmp(stmt->name, "qos.enabled") == 0)
@@ -360,6 +360,7 @@ qos_ProcessUtility(PlannedStmt *pstmt,
     Node *parsetree = pstmt->utilityStmt;
     bool bump_epoch_after = false;
     VariableSetStmt *qos_set = NULL;
+    QoSLimits limits;
     
     /* Enforce work_mem limit on first command in session - delegates to hooks_resource.c */
     if (qos_enabled)
@@ -372,7 +373,11 @@ qos_ProcessUtility(PlannedStmt *pstmt,
     if (qos_enabled && IsA(parsetree, VariableSetStmt))
     {
         VariableSetStmt *stmt = (VariableSetStmt *) parsetree;
-        qos_enforce_work_mem_limit(stmt);
+        limits = qos_get_cached_limits();
+        if (!((limits.work_mem_error_level != QOS_WORK_MEM_ERROR_ERROR) &&
+              stmt->name && strcmp(stmt->name, "work_mem") == 0 &&
+              stmt->kind == VAR_SET_VALUE))
+            qos_enforce_work_mem_limit(stmt);
     }
 
     /* Validate qos.* input and detect ALTER ROLE/DB ... SET qos.* */
@@ -438,6 +443,17 @@ qos_ProcessUtility(PlannedStmt *pstmt,
     else
         standard_ProcessUtility(pstmt, queryString, readOnlyTree, context,
                               params, queryEnv, dest, qc);
+
+    /* For warning mode, enforce work_mem after SET work_mem is applied */
+    if (qos_enabled && IsA(parsetree, VariableSetStmt))
+    {
+        VariableSetStmt *stmt = (VariableSetStmt *) parsetree;
+        limits = qos_get_cached_limits();
+        if ((limits.work_mem_error_level != QOS_WORK_MEM_ERROR_ERROR) &&
+            stmt->name && strcmp(stmt->name, "work_mem") == 0 &&
+            stmt->kind == VAR_SET_VALUE)
+            qos_enforce_work_mem_limit(stmt);
+    }
 
     /* Reset suppression flag */
     suppress_concurrency_tracking = false;
