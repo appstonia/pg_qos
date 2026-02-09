@@ -169,7 +169,10 @@ qos_measure_cpu_cycles(int cpu)
     /* Enable and read cycles */
     ioctl(fd, PERF_EVENT_IOC_RESET, 0);
     ioctl(fd, PERF_EVENT_IOC_ENABLE, 0);
-    usleep(1000); /* Sample for 1ms */
+
+    CHECK_FOR_INTERRUPTS();
+    usleep(100); /* Sample for 100us */
+    
     ioctl(fd, PERF_EVENT_IOC_DISABLE, 0);
     
     bytes_read = read(fd, &count, sizeof(long long));
