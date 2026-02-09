@@ -313,7 +313,7 @@ qos_validate_qos_setstmt(VariableSetStmt *stmt)
 
                 qos_apply_qos_param_value(NULL, stmt->name, value_str, true);
 
-                if (normalized && normalized != value_str)
+                if (normalized)
                     pfree(normalized);
             }
             else
