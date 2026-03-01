@@ -32,7 +32,10 @@
 #include "nodes/makefuncs.h"
 #include "parser/parse_node.h"
 #include "nodes/value.h"
+#include "storage/ipc.h"
 #include <ctype.h>
+#include <signal.h>
+#include <errno.h>
 
 /* Hook save variables */
 static ProcessUtility_hook_type prev_ProcessUtility = NULL;
@@ -97,6 +100,31 @@ qos_get_backend_slot(bool allocate_if_missing)
         }
     }
 
+    /*
+     * if no empty slot found, sweep for stale PIDs from
+     * backends that were killed with SIGKILL (where on_shmem_exit
+     * callbacks don't run).
+     */
+    if (slot < 0 && allocate_if_missing)
+    {
+        for (i = 0; i < qos_shared_state->max_backends; i++)
+        {
+            pid_t slot_pid = qos_shared_state->backend_status[i].pid;
+
+            if (slot_pid != 0 && slot_pid != MyProcPid &&
+                kill(slot_pid, 0) != 0 && errno == ESRCH)
+            {
+                elog(DEBUG1, "qos: reclaiming stale slot %d from dead PID %d",
+                     i, (int) slot_pid);
+                memset(&qos_shared_state->backend_status[i], 0,
+                       sizeof(QoSBackendStatus));
+                qos_shared_state->backend_status[i].pid = MyProcPid;
+                slot = i;
+                break;
+            }
+        }
+    }
+
     qos_backend_slot = slot;
 
     LWLockRelease(qos_shared_state->lock);
@@ -110,6 +138,60 @@ qos_reset_backend_slot(void)
     qos_backend_slot = -1;
 }
 #endif /* MyBackendId */
+
+/*
+ * Shared memory exit callback - clean up backend slot when process exits.
+ *
+ * This is critical: without this, when a backend disconnects (client abort,
+ * timeout), its shared memory slot remains allocated with a
+ * stale PID.  Over repeated connect/disconnect cycles the slots exhaust and
+ * new backends can no longer register, which silently disables concurrency
+ * limits.
+ */
+static void
+qos_shmem_exit_cleanup(int code, Datum arg)
+{
+    int i;
+
+    if (!qos_shared_state)
+        return;
+
+    LWLockAcquire(qos_shared_state->lock, LW_EXCLUSIVE);
+
+#ifndef MyBackendId
+    /* PG 17+: use cached slot index or fall back to PID scan */
+    if (qos_backend_slot >= 0 &&
+        qos_backend_slot < qos_shared_state->max_backends &&
+        qos_shared_state->backend_status[qos_backend_slot].pid == MyProcPid)
+    {
+        memset(&qos_shared_state->backend_status[qos_backend_slot], 0,
+               sizeof(QoSBackendStatus));
+    }
+    else
+    {
+        for (i = 0; i < qos_shared_state->max_backends; i++)
+        {
+            if (qos_shared_state->backend_status[i].pid == MyProcPid)
+            {
+                memset(&qos_shared_state->backend_status[i], 0,
+                       sizeof(QoSBackendStatus));
+                break;
+            }
+        }
+    }
+    qos_backend_slot = -1;
+#else
+    /* PG < 17: deterministic slot from MyBackendId */
+    if (MyBackendId > 0 && MyBackendId <= qos_shared_state->max_backends &&
+        qos_shared_state->backend_status[MyBackendId - 1].pid == MyProcPid)
+    {
+        memset(&qos_shared_state->backend_status[MyBackendId - 1], 0,
+               sizeof(QoSBackendStatus));
+    }
+#endif
+
+    LWLockRelease(qos_shared_state->lock);
+}
 
 /*
  * Transaction callback to handle cleanup on abort/error
@@ -543,6 +625,13 @@ qos_register_hooks(void)
     
     /* Register transaction callback for cleanup on abort */
     RegisterXactCallback(qos_xact_callback, NULL);
+    
+    /*
+     * Register shared-memory exit callback to free our backend_status slot
+     * when this backend exits.  Using before_shmem_exit ensures the LWLock
+     * infrastructure is still functional (ProcKill hasn't run yet).
+     */
+    before_shmem_exit(qos_shmem_exit_cleanup, 0);
     
     elog(DEBUG1, "qos: hooks registered and cache initialized");
 }
