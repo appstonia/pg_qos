@@ -116,6 +116,7 @@ extern Datum qos_reset_stats(PG_FUNCTION_ARGS);
 /* Function declarations */
 extern QoSLimits qos_get_role_limits(Oid roleId);
 extern QoSLimits qos_get_database_limits(Oid dbId);
+extern QoSLimits qos_get_role_db_limits(Oid roleId, Oid dbId);
 extern int64 qos_parse_memory_unit(const char *str);
 extern bool qos_is_valid_qos_param_name(const char *name);
 extern bool qos_apply_qos_param_value(QoSLimits *limits, const char *name,

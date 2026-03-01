@@ -77,10 +77,6 @@ static bool qos_parse_memory_value(const char *value_str, int64 *out,
 static bool qos_parse_work_mem_error_level(const char *value_str,
                                            const char *param_name, bool strict);
 static bool qos_is_valid_qos_param_name_internal(const char *name);
-static bool qos_is_valid_qos_setting_entry(const char *config_str);
-static ArrayType *qos_cleanup_invalid_qos_settings(Relation rel, HeapTuple tuple,
-                                                   ArrayType *configs);
-static char *qos_normalize_work_mem_value(const char *value_str);
 
 bool qos_is_valid_qos_param_name(const char *name);
 bool qos_apply_qos_param_value(QoSLimits *limits, const char *name,
@@ -575,271 +571,6 @@ qos_apply_qos_param_value(QoSLimits *limits, const char *name,
     return false;
 }
 
-static bool
-qos_is_valid_qos_setting_entry(const char *config_str)
-{
-    char *copy;
-    char *name;
-    char *value;
-    bool valid = false;
-
-    if (config_str == NULL)
-        return false;
-
-    copy = pstrdup(config_str);
-    name = copy;
-    value = strchr(copy, '=');
-    if (!value)
-    {
-        pfree(copy);
-        return false;
-    }
-
-    *value = '\0';
-    value++;
-
-    name = qos_trim_whitespace(name);
-    value = qos_trim_whitespace(value);
-
-    if (pg_strncasecmp(name, "qos.", 4) != 0)
-    {
-        pfree(copy);
-        return true;
-    }
-
-    valid = qos_apply_qos_param_value(NULL, name, value, false);
-    pfree(copy);
-    return valid;
-}
-
-static char *
-qos_normalize_work_mem_value(const char *value_str)
-{
-    const char *ptr;
-    const char *num_start;
-    const char *unit_start;
-    size_t num_len;
-    char *num_part;
-    char *unit_part;
-    const char *normalized_unit = NULL;
-
-    if (value_str == NULL)
-        return NULL;
-
-    ptr = value_str;
-    while (*ptr != '\0' && isspace((unsigned char) *ptr))
-        ptr++;
-
-    num_start = ptr;
-    while (*ptr != '\0' && isdigit((unsigned char) *ptr))
-        ptr++;
-
-    if (ptr == num_start)
-        return NULL;
-
-    num_len = (size_t) (ptr - num_start);
-    num_part = palloc(num_len + 1);
-    memcpy(num_part, num_start, num_len);
-    num_part[num_len] = '\0';
-
-    while (*ptr != '\0' && isspace((unsigned char) *ptr))
-        ptr++;
-
-    unit_start = ptr;
-    while (*ptr != '\0' && isalpha((unsigned char) *ptr))
-        ptr++;
-
-    if (*ptr != '\0')
-    {
-        pfree(num_part);
-        return NULL;
-    }
-
-    if (unit_start == ptr)
-    {
-        normalized_unit = "MB";
-    }
-    else
-    {
-        unit_part = pnstrdup(unit_start, ptr - unit_start);
-        if (pg_strcasecmp(unit_part, "k") == 0 || pg_strcasecmp(unit_part, "kb") == 0)
-            normalized_unit = "kB";
-        else if (pg_strcasecmp(unit_part, "m") == 0 || pg_strcasecmp(unit_part, "mb") == 0)
-            normalized_unit = "MB";
-        else if (pg_strcasecmp(unit_part, "g") == 0 || pg_strcasecmp(unit_part, "gb") == 0)
-            normalized_unit = "GB";
-        pfree(unit_part);
-    }
-
-    if (!normalized_unit)
-    {
-        pfree(num_part);
-        return NULL;
-    }
-
-    {
-        char *result = psprintf("%s%s", num_part, normalized_unit);
-        pfree(num_part);
-        return result;
-    }
-}
-
-static ArrayType *
-qos_cleanup_invalid_qos_settings(Relation rel, HeapTuple tuple, ArrayType *configs)
-{
-    int nelems;
-    Datum *elems;
-    bool *nulls;
-    int i;
-    int kept = 0;
-    bool removed = false;
-    Datum *new_elems;
-    ArrayType *new_configs;
-    static Oid last_cleaned_db = InvalidOid;
-    static Oid last_cleaned_role = InvalidOid;
-    static CommandId last_cleaned_cmdid = InvalidCommandId;
-    Oid setdatabase;
-    Oid setrole;
-    CommandId cmdid;
-    bool isnull;
-
-    if (!configs)
-        return configs;
-
-    nelems = ArrayGetNItems(ARR_NDIM(configs), ARR_DIMS(configs));
-    if (nelems <= 0)
-        return configs;
-
-    cmdid = GetCurrentCommandId(false);
-    setdatabase = DatumGetObjectId(heap_getattr(tuple, Anum_pg_db_role_setting_setdatabase,
-                                                RelationGetDescr(rel), &isnull));
-    if (isnull)
-        setdatabase = InvalidOid;
-    setrole = DatumGetObjectId(heap_getattr(tuple, Anum_pg_db_role_setting_setrole,
-                                            RelationGetDescr(rel), &isnull));
-    if (isnull)
-        setrole = InvalidOid;
-
-    if (cmdid == last_cleaned_cmdid &&
-        setdatabase == last_cleaned_db &&
-        setrole == last_cleaned_role)
-        return configs;
-
-    deconstruct_array(configs, TEXTOID, -1, false, TYPALIGN_INT,
-                      &elems, &nulls, &nelems);
-
-    new_elems = (Datum *) palloc(sizeof(Datum) * nelems);
-
-    for (i = 0; i < nelems; i++)
-    {
-        char *config_str;
-
-        if (nulls[i])
-        {
-            removed = true;
-            continue;
-        }
-
-        config_str = TextDatumGetCString(elems[i]);
-        if (pg_strncasecmp(config_str, "qos.", 4) == 0)
-        {
-            char *copy;
-            char *name;
-            char *value;
-
-            if (!qos_is_valid_qos_setting_entry(config_str))
-            {
-                removed = true;
-                pfree(config_str);
-                continue;
-            }
-
-            copy = pstrdup(config_str);
-            name = copy;
-            value = strchr(copy, '=');
-            if (value)
-            {
-                *value = '\0';
-                value++;
-
-                name = qos_trim_whitespace(name);
-                value = qos_trim_whitespace(value);
-
-                if (strcmp(name, "qos.work_mem_limit") == 0)
-                {
-                    char *normalized_value = qos_normalize_work_mem_value(value);
-
-                    if (normalized_value && strcmp(normalized_value, value) != 0)
-                    {
-                        char *normalized = psprintf("%s=%s", name, normalized_value);
-
-                        new_elems[kept++] = CStringGetTextDatum(normalized);
-                        removed = true;
-                        pfree(normalized_value);
-                        pfree(normalized);
-                        pfree(copy);
-                        pfree(config_str);
-                        continue;
-                    }
-
-                    if (normalized_value)
-                        pfree(normalized_value);
-                }
-            }
-
-            pfree(copy);
-        }
-
-        new_elems[kept++] = CStringGetTextDatum(config_str);
-        pfree(config_str);
-    }
-
-    if (!removed)
-    {
-        pfree(new_elems);
-        pfree(elems);
-        pfree(nulls);
-        return configs;
-    }
-
-    if (kept > 0)
-        new_configs = construct_array(new_elems, kept, TEXTOID, -1, false, TYPALIGN_INT);
-    else
-        new_configs = construct_empty_array(TEXTOID);
-
-    {
-        Datum values[Natts_pg_db_role_setting];
-        bool nulls_replace[Natts_pg_db_role_setting];
-        bool replaces[Natts_pg_db_role_setting];
-        HeapTuple newtuple;
-        int j;
-
-        for (j = 0; j < Natts_pg_db_role_setting; j++)
-        {
-            values[j] = (Datum) 0;
-            nulls_replace[j] = false;
-            replaces[j] = false;
-        }
-
-        values[Anum_pg_db_role_setting_setconfig - 1] = PointerGetDatum(new_configs);
-        replaces[Anum_pg_db_role_setting_setconfig - 1] = true;
-
-        newtuple = heap_modify_tuple(tuple, RelationGetDescr(rel), values, nulls_replace, replaces);
-        CatalogTupleUpdate(rel, &newtuple->t_self, newtuple);
-        heap_freetuple(newtuple);
-    }
-
-    last_cleaned_db = setdatabase;
-    last_cleaned_role = setrole;
-    last_cleaned_cmdid = cmdid;
-
-    pfree(new_elems);
-    pfree(elems);
-    pfree(nulls);
-
-    return new_configs;
-}
-
 /*
  * Get QoS limits for current role using pg_db_role_setting
  */
@@ -863,7 +594,7 @@ qos_get_role_limits(Oid roleId)
     limits.work_mem_error_level = -1;
     
     /* Open pg_db_role_setting catalog */
-    pg_db_role_setting_rel = table_open(DbRoleSettingRelationId, RowExclusiveLock);
+    pg_db_role_setting_rel = table_open(DbRoleSettingRelationId, AccessShareLock);
     
     /* Scan for this role's settings (setdatabase = 0 means all databases) */
     ScanKeyInit(&scankey[0],
@@ -890,20 +621,16 @@ qos_get_role_limits(Oid roleId)
         if (!isnull)
         {
             ArrayType *configs = DatumGetArrayTypeP(configDatum);
-            ArrayType *cleaned_configs = qos_cleanup_invalid_qos_settings(pg_db_role_setting_rel,
-                                                                         tuple, configs);
-            parse_role_configs(cleaned_configs, &limits);
+            parse_role_configs(configs, &limits);
             
             /* Free detoasted copy if it was created */
             if ((Pointer) configs != DatumGetPointer(configDatum))
                 pfree(configs);
-            if (cleaned_configs != configs && (Pointer) cleaned_configs != DatumGetPointer(configDatum))
-                pfree(cleaned_configs);
         }
     }
     
     systable_endscan(scan);
-    table_close(pg_db_role_setting_rel, RowExclusiveLock);
+    table_close(pg_db_role_setting_rel, AccessShareLock);
     
     return limits;
 }
@@ -931,7 +658,7 @@ qos_get_database_limits(Oid dbId)
     limits.work_mem_error_level = -1;
     
     /* Open pg_db_role_setting catalog */
-    pg_db_role_setting_rel = table_open(DbRoleSettingRelationId, RowExclusiveLock);
+    pg_db_role_setting_rel = table_open(DbRoleSettingRelationId, AccessShareLock);
     
     /* Scan for this database's settings (setrole = 0 means all roles) */
     ScanKeyInit(&scankey[0],
@@ -958,20 +685,85 @@ qos_get_database_limits(Oid dbId)
         if (!isnull)
         {
             ArrayType *configs = DatumGetArrayTypeP(configDatum);
-            ArrayType *cleaned_configs = qos_cleanup_invalid_qos_settings(pg_db_role_setting_rel,
-                                                                         tuple, configs);
-            parse_role_configs(cleaned_configs, &limits);
+            parse_role_configs(configs, &limits);
             
             /* Free detoasted copy if it was created */
             if ((Pointer) configs != DatumGetPointer(configDatum))
                 pfree(configs);
-            if (cleaned_configs != configs && (Pointer) cleaned_configs != DatumGetPointer(configDatum))
-                pfree(cleaned_configs);
         }
     }
     
     systable_endscan(scan);
-    table_close(pg_db_role_setting_rel, RowExclusiveLock);
+    table_close(pg_db_role_setting_rel, AccessShareLock);
+    
+    return limits;
+}
+
+/*
+ * Get QoS limits for a specific role+database combination using pg_db_role_setting
+ * This handles the ALTER ROLE x IN DATABASE y SET qos.* case
+ */
+QoSLimits
+qos_get_role_db_limits(Oid roleId, Oid dbId)
+{
+    QoSLimits limits;
+    Relation pg_db_role_setting_rel;
+    ScanKeyData scankey[2];
+    SysScanDesc scan;
+    HeapTuple tuple;
+    
+    /* Set defaults */
+    limits.work_mem_limit = -1;
+    limits.cpu_core_limit = -1;
+    limits.max_concurrent_tx = -1;    
+    limits.max_concurrent_select = -1;
+    limits.max_concurrent_update = -1;
+    limits.max_concurrent_delete = -1;
+    limits.max_concurrent_insert = -1;
+    limits.work_mem_error_level = -1;
+    
+    /* Skip if either OID is invalid */
+    if (!OidIsValid(roleId) || !OidIsValid(dbId))
+        return limits;
+    
+    /* Open pg_db_role_setting catalog */
+    pg_db_role_setting_rel = table_open(DbRoleSettingRelationId, AccessShareLock);
+    
+    /* Scan for this specific role+database combination */
+    ScanKeyInit(&scankey[0],
+                Anum_pg_db_role_setting_setdatabase,
+                BTEqualStrategyNumber, F_OIDEQ,
+                ObjectIdGetDatum(dbId));
+    ScanKeyInit(&scankey[1],
+                Anum_pg_db_role_setting_setrole,
+                BTEqualStrategyNumber, F_OIDEQ,
+                ObjectIdGetDatum(roleId));
+    
+    scan = systable_beginscan(pg_db_role_setting_rel, DbRoleSettingDatidRolidIndexId,
+                              true, NULL, 2, scankey);
+    
+    tuple = systable_getnext(scan);
+    if (HeapTupleIsValid(tuple))
+    {
+        bool isnull;
+        Datum configDatum;
+        
+        configDatum = heap_getattr(tuple, Anum_pg_db_role_setting_setconfig,
+                                  RelationGetDescr(pg_db_role_setting_rel), &isnull);
+        
+        if (!isnull)
+        {
+            ArrayType *configs = DatumGetArrayTypeP(configDatum);
+            parse_role_configs(configs, &limits);
+            
+            /* Free detoasted copy if it was created */
+            if ((Pointer) configs != DatumGetPointer(configDatum))
+                pfree(configs);
+        }
+    }
+    
+    systable_endscan(scan);
+    table_close(pg_db_role_setting_rel, AccessShareLock);
     
     return limits;
 }

@@ -127,43 +127,55 @@ qos_refresh_cached_limits(void)
     if (limits_cached && cached_user_id == current_user_id && cached_db_id == current_db_id)
         return;
     
-    /* Refresh cache - query catalogs */
+    /* Refresh cache - query catalogs for all 3 possible setting scopes */
     role_limits = qos_get_role_limits(current_user_id);
     db_limits = qos_get_database_limits(current_db_id);
     
-    /* Calculate limits (most restrictive) */
-    #define CALC_LIMIT(field) \
-        if (role_limits.field >= 0 && db_limits.field >= 0) \
-            cached_limits.field = Min(role_limits.field, db_limits.field); \
-        else if (role_limits.field >= 0) \
-            cached_limits.field = role_limits.field; \
-        else if (db_limits.field >= 0) \
-            cached_limits.field = db_limits.field; \
-        else \
-            cached_limits.field = -1;
-    
-    CALC_LIMIT(work_mem_limit);
-    CALC_LIMIT(cpu_core_limit);
-    CALC_LIMIT(max_concurrent_tx);
-    CALC_LIMIT(max_concurrent_select);
-    CALC_LIMIT(max_concurrent_update);
-    CALC_LIMIT(max_concurrent_delete);
-    CALC_LIMIT(max_concurrent_insert);
-    CALC_LIMIT(work_mem_error_level);
-    
-    #undef CALC_LIMIT
+    {
+        QoSLimits role_db_limits;
+        role_db_limits = qos_get_role_db_limits(current_user_id, current_db_id);
+
+        /*
+         * Calculate limits (most restrictive wins).
+         * Three sources:
+         *   role_limits    = ALTER ROLE x SET qos.*           (db=0, role=X)
+         *   db_limits      = ALTER DATABASE y SET qos.*       (db=Y, role=0)
+         *   role_db_limits = ALTER ROLE x IN DATABASE y SET   (db=Y, role=X)
+         * Take the minimum of all that are set (>= 0).
+         */
+        #define PICK_MIN(a, b) \
+            ((a) >= 0 && (b) >= 0 ? Min((a), (b)) : ((a) >= 0 ? (a) : (b)))
+        
+        #define CALC_LIMIT(field) \
+            do { \
+                int64 _tmp = PICK_MIN(role_limits.field, db_limits.field); \
+                cached_limits.field = PICK_MIN(_tmp, role_db_limits.field); \
+            } while (0)
+        
+        CALC_LIMIT(work_mem_limit);
+        CALC_LIMIT(cpu_core_limit);
+        CALC_LIMIT(max_concurrent_tx);
+        CALC_LIMIT(max_concurrent_select);
+        CALC_LIMIT(max_concurrent_update);
+        CALC_LIMIT(max_concurrent_delete);
+        CALC_LIMIT(max_concurrent_insert);
+        CALC_LIMIT(work_mem_error_level);
+        
+        #undef CALC_LIMIT
+        #undef PICK_MIN
+    }
 
     /* Update cache metadata */
     cached_user_id = current_user_id;
     cached_db_id = current_db_id;
     limits_cached = true;
     
-    elog(DEBUG1, "qos: cached limits refreshed - work_mem: %ld, cpu_cores: %d, max_tx: %d (user: %u, db: %u)",
-        cached_limits.work_mem_limit,
-        cached_limits.cpu_core_limit,
-        cached_limits.max_concurrent_tx,
-        cached_user_id,
-        cached_db_id);
+    elog(DEBUG1, "qos: effective limits - work_mem=%ld cpu=%d tx=%d sel=%d upd=%d del=%d ins=%d errlvl=%d (user=%u db=%u)",
+        cached_limits.work_mem_limit, cached_limits.cpu_core_limit,
+        cached_limits.max_concurrent_tx, cached_limits.max_concurrent_select,
+        cached_limits.max_concurrent_update, cached_limits.max_concurrent_delete,
+        cached_limits.max_concurrent_insert, cached_limits.work_mem_error_level,
+        cached_user_id, cached_db_id);
 }
 
 /*

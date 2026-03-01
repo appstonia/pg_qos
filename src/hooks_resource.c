@@ -505,7 +505,16 @@ qos_enforce_work_mem_limit(VariableSetStmt *stmt)
     if (!qos_enabled)
         return;
     
-    /* Get cached limits - no catalog access needed */
+    /*
+     * For SET work_mem checks, force cache invalidation to guarantee
+     * we use fresh limits.  The cache might have been populated before
+     * all catalog snapshots were consistent (e.g. during first command
+     * of the session when relcache events can reset it mid-computation).
+     */
+    if (stmt != NULL)
+        qos_invalidate_cache();
+    
+    /* Get cached limits - refreshes if invalidated */
     limits = qos_get_cached_limits();
     
     /* Check if limit is enabled */
@@ -535,6 +544,9 @@ qos_enforce_work_mem_limit(VariableSetStmt *stmt)
             {
                 return; /* Unknown value type */
             }
+            
+            elog(DEBUG1, "qos: work_mem SET check - requested=%ld bytes, limit=%ld bytes, error_level=%d",
+                 new_work_mem_bytes, limits.work_mem_limit, limits.work_mem_error_level);
             
             /* Check if new value exceeds limit */
             if (new_work_mem_bytes > limits.work_mem_limit)
