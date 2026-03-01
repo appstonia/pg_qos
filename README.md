@@ -99,6 +99,10 @@ ALTER ROLE app_user SET qos.max_concurrent_select = '100';
 
 -- Per-database limits (for all roles)
 ALTER DATABASE appdb SET qos.max_concurrent_tx = '200';
+
+-- Per-role limits for a specific database
+ALTER ROLE app_user IN database appdb SET qos.work_mem_limit = '4MB';
+ALTER ROLE app_user IN database appdb SET qos.max_concurrent_update = '10';
 ```
 
 Effective limits are the most restrictive combination of role-level and database-level settings.
