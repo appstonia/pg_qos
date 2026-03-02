@@ -19,10 +19,34 @@ and to prevent complicating maintenance/administration processes by eliminating 
 ## Requirements
 
 - PostgreSQL 15 or newer (officially supported)
-- Build toolchain and server headers (`pg_config` must be available)
+- Build toolchain and server headers to install from source code (`pg_config` must be available)
 - Linux for CPU limiting; on other platforms, only parallel worker limiting is applied
 
-Debian/Ubuntu packages:
+## Installation From Package
+
+### Debian 13 Package
+```bash
+# Install
+sudo dpkg -i postgresql-<version>-qos_1.0.0-1_debian13_amd64.deb
+sudo apt-get install -f
+```
+
+### Ubuntu 24.04 Package
+```bash
+# Install
+sudo dpkg -i postgresql-<version>-qos_1.0.0-1ubuntu1_amd64.deb
+sudo apt-get install -f
+```
+
+### RHEL/AlmaLinux/Centos 10 (PGDG) Package
+```bash
+# Install
+sudo rpm -i postgresql<version>-qos-1.0.0-1.el10.x86_64.rpm
+```
+
+## Installation From Source
+
+### Debian/Ubuntu packages:
 
 - Install the server development package that matches your PostgreSQL version:
   - `postgresql-server-dev-15` (for PostgreSQL 15)
@@ -30,7 +54,7 @@ Debian/Ubuntu packages:
   - `postgresql-server-dev-17` (for PostgreSQL 17)
   - `postgresql-server-dev-18` (for PostgreSQL 18)
 
-Example (Ubuntu/Debian):
+### Example (Ubuntu/Debian):
 
 ```bash
 sudo apt update
@@ -38,7 +62,7 @@ sudo apt update
 sudo apt install postgresql-server-dev-18 build-essential
 ```
 
-## Build and Install
+### Build and Install
 
 1. Build
 
@@ -52,7 +76,7 @@ make
 sudo make install
 ```
 
-Notes for Debian/Ubuntu:
+### Notes for Debian/Ubuntu:
 
 - Ensure the correct `postgresql-server-dev-<version>` is installed so `pg_config` points to your intended server version.
 - If you have multiple PostgreSQL versions installed, you can point the build to a specific one by exporting PG_CONFIG:
@@ -62,6 +86,8 @@ make clean
 make PG_CONFIG=/usr/lib/postgresql/<version>/bin/pg_config
 sudo make install PG_CONFIG=/usr/lib/postgresql/<version>/bin/pg_config
 ```
+
+## Configure
 
 1. Enable the extension (server restart required due to hooks and shared memory)
 
