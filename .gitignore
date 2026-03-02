@@ -8,5 +8,6 @@
 build.sh
 .vscode/
 debian/
+rhel/
 *.buildinfo
 build*
