@@ -34,7 +34,7 @@ sudo apt-get install -f
 ### Ubuntu 24.04 Package
 ```bash
 # Install
-sudo dpkg -i postgresql-<version>-qos_1.0.0-1ubuntu1_amd64.deb
+sudo dpkg -i postgresql-<version>-qos_1.0.0-1-ubuntu24_amd64.deb
 sudo apt-get install -f
 ```
 
