@@ -87,21 +87,27 @@ sudo dnf install -y gcc make autoconf libtool automake postgresql18-devel redhat
 make
 ```
 
-1. Install
+2. Install
 
 ```bash
 sudo make install
 ```
 
-### Notes for Debian/Ubuntu:
+### Notes:
 
-- Ensure the correct `postgresql-server-dev-<version>` is installed so `pg_config` points to your intended server version.
+- Ensure the correct `postgresql-server-dev-<version>` for Debian/Ubuntu or `postgresql<version>-devel` for RHEL/AlmaLinux/Centos/Rocky is installed so `pg_config` points to your intended server version.
 - If you have multiple PostgreSQL versions installed, you can point the build to a specific one by exporting PG_CONFIG:
 
 ```bash
+# Debian/Ubuntu
 make clean
 make PG_CONFIG=/usr/lib/postgresql/<version>/bin/pg_config
 sudo make install PG_CONFIG=/usr/lib/postgresql/<version>/bin/pg_config
+
+# RHEL/AlmaLinux/Centos/Rocky
+make clean
+make PG_CONFIG=/usr/pgsql-<version>/bin/pg_config
+sudo make install PG_CONFIG=/usr/pgsql-<version>/bin/pg_config
 ```
 
 ## Configure
