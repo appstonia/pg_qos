@@ -62,6 +62,23 @@ sudo apt update
 sudo apt install postgresql-server-dev-18 build-essential
 ```
 
+### RHEL/AlmaLinux/Centos/Rocky packages:
+
+- Install the server development package that matches your PostgreSQL version:
+  - `postgresql15-devel` (for PostgreSQL 15)
+  - `postgresql16-devel` (for PostgreSQL 16)
+  - `postgresql17-devel` (for PostgreSQL 17)
+  - `postgresql18-devel` (for PostgreSQL 18)
+
+### Example (RHEL/AlmaLinux/Centos/Rocky):
+
+```bash
+# Setup pgdg repository
+sudo dnf install -y https://download.postgresql.org/pub/repos/yum/reporpms/EL-10-x86_64/pgdg-redhat-repo-latest.noarch.rpm
+# Choose the version you run (15/16/17/18)
+sudo dnf install -y gcc make autoconf libtool automake postgresql18-devel redhat-rpm-config
+```
+
 ### Build and Install
 
 1. Build
