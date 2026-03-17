@@ -100,14 +100,16 @@ sudo make install
 
 ```bash
 # Debian/Ubuntu
-make clean PG_CONFIG=/usr/lib/postgresql/<version>/bin/pg_config
-make PG_CONFIG=/usr/lib/postgresql/<version>/bin/pg_config
-sudo make install PG_CONFIG=/usr/lib/postgresql/<version>/bin/pg_config
+export PG_CONFIG=/usr/lib/postgresql/<version>/bin/pg_config
+make clean
+make
+sudo make install
 
 # RHEL/AlmaLinux/Centos/Rocky
-make clean PG_CONFIG=/usr/pgsql-<version>/bin/pg_config
-make PG_CONFIG=/usr/pgsql-<version>/bin/pg_config
-sudo make install PG_CONFIG=/usr/pgsql-<version>/bin/pg_config
+export PG_CONFIG=/usr/pgsql-<version>/bin/pg_config
+make clean
+make
+sudo make install
 ```
 
 ## Configure
