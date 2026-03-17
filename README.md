@@ -100,7 +100,7 @@ sudo make install
 
 ```bash
 # Debian/Ubuntu
-make clean PG_CONFIG=/usr/pgsql-<version>/bin/pg_config
+make clean PG_CONFIG=/usr/lib/postgresql/<version>/bin/pg_config
 make PG_CONFIG=/usr/lib/postgresql/<version>/bin/pg_config
 sudo make install PG_CONFIG=/usr/lib/postgresql/<version>/bin/pg_config
 
